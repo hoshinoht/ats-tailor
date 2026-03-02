@@ -1,0 +1,36 @@
+# Project inventory with tech stacks, responsibilities, and ATS tags.
+
+projects:
+  - id: "taskflow"
+    name: "TaskFlow"
+    type: team
+    period: "Jan 2025 – Present"
+    summary: "Real-time task management platform with microservices backend"
+    tech_stack:
+      languages: [Python, Go, JavaScript]
+      frameworks: [FastAPI, React]
+      infrastructure: [Docker, PostgreSQL, Redis]
+      patterns: [REST, "Event-Driven Architecture", Microservices]
+      tools: [pytest, Prometheus, Grafana]
+    responsibilities:
+      - "Designed REST API gateway handling 500+ req/s with FastAPI and async workers"
+      - "Built event-driven notification service using Redis pub/sub for real-time updates"
+      - "Implemented CI/CD pipeline with Docker multi-stage builds reducing image size by 60%"
+    ats_tags: ["Microservices", "REST", "Docker", "PostgreSQL", "Event-Driven", "FastAPI", "Python", "Go"]
+
+  - id: "mlpipe"
+    name: "MLPipe"
+    type: solo
+    period: "Aug 2024 – Dec 2024"
+    summary: "End-to-end ML pipeline for time-series forecasting"
+    tech_stack:
+      languages: [Python]
+      frameworks: [PyTorch, scikit-learn]
+      infrastructure: [Docker, AWS]
+      patterns: ["ML Pipeline", "Feature Engineering"]
+      tools: [MLflow, DVC, pytest]
+    responsibilities:
+      - "Built automated feature engineering pipeline processing 2M+ records daily"
+      - "Trained LSTM models achieving 15% MAPE improvement over baseline ARIMA"
+      - "Deployed model serving endpoint on AWS with Docker, handling 200 req/s"
+    ats_tags: ["Machine Learning", "PyTorch", "LSTM", "AWS", "Docker", "Python", "MLflow"]

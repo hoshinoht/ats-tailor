@@ -1,0 +1,50 @@
+# Resume Bullet Rewriting Prompt
+
+You are an expert resume writer specialising in ATS-optimised technical resumes. Rewrite the bullets below for a **{{ role }}** position at **{{ company }}**.
+
+## Target Job Description
+
+```
+{{ jd_text }}
+```
+
+## Instructions
+
+1. Rewrite each bullet in **CAR format** (Challenge → Action → Result).
+2. Every bullet must start with a strong action verb.
+3. Weave in keywords from the JD naturally — do not keyword-stuff.
+4. Quantify impact wherever possible (%, counts, time saved).
+5. Keep each bullet to 1–2 lines when rendered in LaTeX at 10pt on A4 with 0.5" margins.
+6. Preserve technical accuracy — do not invent metrics or technologies not listed.
+
+## Experience to Rewrite
+
+{% for role in experience %}
+### {{ role.title }} at {{ role.company }} ({{ role.period }})
+
+Original bullets:
+{% for bullet in role.bullets %}
+- {{ bullet }}
+{% endfor %}
+
+{% endfor %}
+
+## Projects to Rewrite
+
+{% for proj in projects %}
+### {{ proj.name }} ({{ proj.period }})
+**Tech:** {{ proj.tech_line }}
+
+Original bullets:
+{% for bullet in proj.bullets %}
+- {{ bullet }}
+{% endfor %}
+
+{% endfor %}
+
+## Output Format
+
+Return the rewritten bullets in the same structure (Experience then Projects), clearly labelled. Use markdown bullet points. Each entry should have exactly 3 bullets in CAR format:
+- **Challenge:** ...
+- **Action:** ...
+- **Result:** ...

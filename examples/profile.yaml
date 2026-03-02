@@ -1,0 +1,8 @@
+# Personal info rendered into the resume header.
+# Copy this file alongside your index/ directory and fill in your details.
+
+name: "Jane Doe"
+email: "jane.doe@example.com"
+phone: "+1 555 000 1234"
+linkedin: "janedoe"
+github: "janedoe"

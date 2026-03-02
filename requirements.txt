@@ -1,0 +1,5 @@
+pyyaml
+sentence-transformers
+numpy
+jinja2
+matplotlib

@@ -1,0 +1,7 @@
+# Certifications with issuer and ATS keyword mapping.
+
+certifications:
+  - id: "aws-ccp"
+    name: "AWS Cloud Practitioner"
+    issuer: "Amazon Web Services"
+    ats_keywords: ["AWS", "Cloud", "Amazon Web Services"]

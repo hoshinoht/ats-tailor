@@ -1,0 +1,20 @@
+Backend Software Engineer
+
+We are looking for a Backend Software Engineer to join our platform team.
+
+Responsibilities:
+- Design, build, and maintain scalable backend services using Python and Go
+- Develop RESTful APIs and event-driven microservices
+- Write clean, well-tested code with comprehensive unit and integration tests
+- Collaborate with frontend engineers to define API contracts
+- Optimize database queries and improve system performance
+- Participate in code reviews and contribute to engineering best practices
+
+Requirements:
+- 1+ years of experience with Python or Go
+- Strong understanding of REST APIs and microservice architecture
+- Experience with relational databases (PostgreSQL preferred)
+- Familiarity with Docker, CI/CD pipelines, and cloud platforms (AWS)
+- Knowledge of message queues (Redis, RabbitMQ) is a plus
+- Experience with monitoring tools (Prometheus, Grafana) is a plus
+- BSc in Computer Science or equivalent

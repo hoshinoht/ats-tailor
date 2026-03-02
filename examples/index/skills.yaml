@@ -1,0 +1,33 @@
+# Skills taxonomy with ATS keywords and proficiency levels.
+# Proficiency: advanced | intermediate | familiar
+
+categories:
+  - name: "Programming Languages"
+    skills:
+      - name: "Python"
+        ats_keywords: ["Python", "python3"]
+        proficiency: advanced
+      - name: "Go"
+        ats_keywords: ["Go", "Golang"]
+        proficiency: intermediate
+      - name: "JavaScript"
+        ats_keywords: ["JavaScript", "JS", "ES6"]
+        proficiency: intermediate
+      - name: "SQL"
+        ats_keywords: ["SQL", "PostgreSQL", "MySQL"]
+        proficiency: intermediate
+
+  - name: "Cloud & Infrastructure"
+    skills:
+      - name: "Docker"
+        ats_keywords: ["Docker", "Containers", "Containerization"]
+        proficiency: advanced
+      - name: "AWS"
+        ats_keywords: ["AWS", "Amazon Web Services", "EC2", "S3"]
+        proficiency: intermediate
+      - name: "Kubernetes"
+        ats_keywords: ["Kubernetes", "K8s", "Container Orchestration"]
+        proficiency: familiar
+      - name: "PostgreSQL"
+        ats_keywords: ["PostgreSQL", "Postgres", "RDBMS"]
+        proficiency: intermediate

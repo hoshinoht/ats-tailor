@@ -1,0 +1,20 @@
+# Work history and education.
+
+roles:
+  - id: "acme-swe"
+    company: "Acme Corp"
+    title: "Software Engineer Intern"
+    period: "Jun 2024 – Dec 2024"
+    type: internship
+    skills_used: ["Python", "Go", "Docker", "PostgreSQL", "REST"]
+    bullets:
+      - "Developed microservice handling 1,000+ daily transactions with Go and PostgreSQL"
+      - "Reduced API response latency by 40% through query optimization and caching"
+      - "Wrote integration tests covering 90% of critical payment workflows"
+    ats_tags: ["Go", "Python", "Docker", "PostgreSQL", "Microservices", "REST"]
+
+education:
+  - institution: "Example University"
+    degree: "BSc (Hons)"
+    field: "Computer Science"
+    period: "2022 – 2026"
