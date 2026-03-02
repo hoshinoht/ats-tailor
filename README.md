@@ -81,6 +81,37 @@ score(i) = (semantic(i) + keyword_bonus(i)) × recency(i)
 
 See [docs/algorithm.pdf](docs/algorithm.pdf) for a full writeup of the scoring formula, selection algorithm, page budget enforcement, and design evolution.
 
+## Editor
+
+A browser-based YAML editor for your resume index. Edit skills, projects, experience, and certifications with live validation — changes write back to the YAML files on disk.
+
+### With Docker (recommended)
+
+```bash
+docker compose up --build
+```
+
+Opens at [localhost:8070](http://localhost:8070). The compose file mounts `../index` into the container, so when used inside the outer resume repo your index files are read and written directly.
+
+For standalone use (ats-tailor cloned on its own), override the volume:
+
+```bash
+docker compose run -v /path/to/your/index:/data/index editor
+```
+
+### Without Docker
+
+Requires Go 1.22+.
+
+```bash
+cd editor
+go build -o yamledit .
+./yamledit                    # auto-detects <git-root>/index
+./yamledit -dir /path/to/index  # explicit path
+./yamledit -port 9090         # custom port (default 8070)
+./yamledit -no-browser        # don't auto-open browser
+```
+
 ## License
 
 MIT
