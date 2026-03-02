@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YAML Editor</title>
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "@codemirror/view":            "https://esm.sh/@codemirror/view@6.36.5?external=@codemirror/state,@lezer/common",
+      "@codemirror/state":           "https://esm.sh/@codemirror/state@6.5.2",
+      "@codemirror/language":        "https://esm.sh/@codemirror/language@6.11.0?external=@codemirror/state,@codemirror/view,@lezer/common,@lezer/highlight",
+      "@codemirror/commands":        "https://esm.sh/@codemirror/commands@6.8.1?external=@codemirror/state,@codemirror/view,@codemirror/language",
+      "@codemirror/search":          "https://esm.sh/@codemirror/search@6.5.10?external=@codemirror/state,@codemirror/view",
+      "@codemirror/autocomplete":    "https://esm.sh/@codemirror/autocomplete@6.18.6?external=@codemirror/state,@codemirror/view,@codemirror/language,@lezer/common",
+      "@codemirror/lang-yaml":       "https://esm.sh/@codemirror/lang-yaml@6.1.2?external=@codemirror/language,@codemirror/state,@lezer/common,@lezer/highlight",
+      "@codemirror/theme-one-dark":  "https://esm.sh/@codemirror/theme-one-dark@6.1.2?external=@codemirror/state,@codemirror/view,@lezer/highlight",
+      "@lezer/common":               "https://esm.sh/@lezer/common@1.2.3",
+      "@lezer/highlight":            "https://esm.sh/@lezer/highlight@1.2.1?external=@lezer/common",
+      "js-yaml":                     "https://esm.sh/js-yaml@4.1.0"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header class="app-header">
+    <span class="app-title">YAML Editor</span>
+    <div class="search-wrap" id="searchWrap">
+      <input type="text" id="searchInput" class="search-input" placeholder="Search across all files… (Ctrl+K)" autocomplete="off" />
+      <div id="searchResults" class="search-results hidden"></div>
+    </div>
+    <div class="header-controls">
+      <div class="mode-toggle" id="modeToggle">
+        <button class="mode-btn active" id="btnTree" data-mode="tree">Tree</button>
+        <button class="mode-btn" id="btnRaw" data-mode="raw">Raw</button>
+      </div>
+      <button class="dark-toggle" id="darkToggle" title="Toggle dark mode">&#9679;</button>
+    </div>
+  </header>
+
+  <div class="tab-bar" id="tabBar"></div>
+
+  <div id="externalChangeBanner" class="external-banner hidden">
+    File changed externally.
+    <button id="bannerReload">Reload</button>
+    <button id="bannerIgnore">Ignore</button>
+  </div>
+
+  <main class="editor-area" id="editorArea">
+    <div id="treeContainer" class="tree-container"></div>
+    <div id="rawContainer" class="raw-container hidden"></div>
+  </main>
+
+  <div id="statusPill" class="status-pill hidden"></div>
+
+  <script type="module" src="raw.js"></script>
+  <script type="module" src="tree.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
