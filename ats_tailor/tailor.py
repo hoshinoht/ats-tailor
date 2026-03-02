@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import json
 import math
 import os
 import re
@@ -297,6 +298,48 @@ _GAP_STOPWORDS = {
 }
 
 
+def expand_jd_with_llm(jd_text, model_name):
+    """Call ollama REST API to expand JD text into implied keywords/technologies."""
+    from urllib.request import urlopen, Request
+    from urllib.error import URLError
+
+    prompt = (
+        "Given this job description, output a JSON array of 10-25 specific technical "
+        "keywords that are strongly implied but not explicitly stated. "
+        "Include ONLY: programming languages, frameworks, libraries, tools, platforms, "
+        "protocols, and concrete technical concepts. "
+        "Exclude: soft skills, generic terms (e.g. 'Testing', 'Documentation', "
+        "'Communication', 'Problem Solving', 'Leadership'), and job titles. "
+        "Output ONLY the JSON array.\n\n"
+        f"Job description:\n{jd_text}"
+    )
+    payload = json.dumps({"model": model_name, "prompt": prompt, "stream": False}).encode()
+    try:
+        req = Request("http://localhost:11434/api/generate", data=payload,
+                      headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=120) as resp:
+            raw = json.loads(resp.read())["response"]
+        # Extract JSON array (model may wrap it in markdown fences or thinking tags)
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not match:
+            print(f"  Warning: could not parse LLM response as JSON array", file=sys.stderr)
+            return ""
+        terms = json.loads(match.group())
+        if not isinstance(terms, list):
+            return ""
+        terms = [str(t) for t in terms if isinstance(t, str)]
+        return "\n".join(terms)
+    except URLError:
+        print("  Warning: cannot reach ollama at localhost:11434 — is it running?", file=sys.stderr)
+        return ""
+    except (json.JSONDecodeError, ValueError, KeyError) as e:
+        print(f"  Warning: failed to parse LLM response: {e}", file=sys.stderr)
+        return ""
+    except Exception as e:
+        print(f"  Warning: LLM expansion failed: {e}", file=sys.stderr)
+        return ""
+
+
 def detect_coverage_gaps(jd_text, skills_data, projects_data, exp_data, certs_data):
     """Find tech-looking terms in the JD that aren't in any index file."""
     known = set()
@@ -456,7 +499,7 @@ def render_prompt(company, role, jd_text, experience, projects):
 
 
 # ── Match report ───────────────────────────────────────────────────────────────
-def generate_report(company, role, exp_ranked, proj_ranked, skill_lines, cert_ranked, gaps=None):
+def generate_report(company, role, exp_ranked, proj_ranked, skill_lines, cert_ranked, gaps=None, llm_terms=None):
     """Generate a markdown match report."""
     lines = [
         f"# Match Report: {company} – {role}",
@@ -511,6 +554,17 @@ def generate_report(company, role, exp_ranked, proj_ranked, skill_lines, cert_ra
         ]
         for g in gaps:
             lines.append(f"- {g}")
+
+    if llm_terms:
+        lines += [
+            "",
+            "## LLM-Expanded Keywords",
+            "",
+            "The following terms were inferred from the JD by a local LLM and injected",
+            "into the keyword matching pool to improve tag overlap scoring.",
+            "",
+            ", ".join(llm_terms),
+        ]
 
     lines.append("")
     return "\n".join(lines)
@@ -639,6 +693,8 @@ def main():
     parser.add_argument("--output", type=str, help="Output directory (default: output/{company}-{role})")
     parser.add_argument("--index", type=str, default="index", help="Path to YAML index directory (default: index/)")
     parser.add_argument("--profile", type=str, default=None, help="Path to profile.yaml (default: profile.yaml next to index dir)")
+    parser.add_argument("--llm", nargs="?", const="qwen2.5-coder:7b", default=None,
+                        help="Expand JD keywords via ollama LLM (default model: qwen2.5-coder:7b)")
     args = parser.parse_args()
 
     if not args.company or not args.role:
@@ -685,10 +741,21 @@ def main():
     education = exp_data["education"][:2]
     certs = certs_data["certifications"]
 
-    # ── Coverage gap detection ──
+    # ── Coverage gap detection (before LLM expansion, so gaps reflect original JD) ──
     gaps = detect_coverage_gaps(jd_text, skills_data, projects_data, exp_data, certs_data)
     if gaps:
         print(f"  Warning: {len(gaps)} JD term(s) not in index: {', '.join(gaps)}")
+
+    # ── Optional LLM keyword expansion ──
+    llm_terms = None
+    if args.llm:
+        print(f"Expanding JD keywords via ollama ({args.llm})...")
+        expanded = expand_jd_with_llm(jd_text, args.llm)
+        if expanded:
+            llm_terms = [t.strip() for t in expanded.split("\n") if t.strip()]
+            print(f"  LLM expanded terms: {', '.join(llm_terms)}")
+            jd_text = jd_text + "\n" + expanded
+            jd_lower = jd_text.lower()
 
     # ── Load model & embed ──
     print("Loading embedding model (first run downloads ~22MB)...")
@@ -799,7 +866,7 @@ def main():
         for c, s in sorted(zip(certs, cert_scores), key=lambda x: x[1], reverse=True)
     ]
 
-    report = generate_report(args.company, args.role, exp_ranked, proj_ranked, skill_lines, cert_ranked, gaps)
+    report = generate_report(args.company, args.role, exp_ranked, proj_ranked, skill_lines, cert_ranked, gaps, llm_terms)
     (out_dir / "match_report.md").write_text(report)
 
     # ── Visualization ──

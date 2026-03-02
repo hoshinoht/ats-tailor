@@ -28,6 +28,36 @@ python -m ats_tailor.tailor \
 | `--index` | `index/` | YAML index directory |
 | `--profile` | `profile.yaml` next to index | Profile YAML (name, email, links) |
 | `--output` | `output/{company}-{role}` | Output directory |
+| `--llm` | off | Expand JD keywords via local LLM (see below) |
+
+## LLM keyword expansion
+
+Tag overlap scoring uses exact string matching — if the JD says "AI Engineer" it won't match an `ats_tag` like "Deep Learning" because the literal string isn't there. The `--llm` flag sends the JD to a local [ollama](https://ollama.com) model to infer implied technical keywords, which are appended to the matching pool before scoring.
+
+```bash
+# use default model (qwen2.5-coder:7b)
+python -m ats_tailor.tailor --llm ...
+
+# use a specific model
+python -m ats_tailor.tailor --llm qwen2.5-coder:1.5b ...
+
+# omit flag entirely to skip expansion (default)
+python -m ats_tailor.tailor ...
+```
+
+**Default model:** `qwen2.5-coder:7b` (~4.7 GB download, ~5s per JD). Produces 20-25 focused technical terms with minimal noise.
+
+**Choosing a model:** Any ollama model works. Smaller models like `qwen2.5-coder:1.5b` (~1 GB, ~2s) are faster but produce noisier output (soft skills, generic terms). Thinking models like `qwen3` tend to be slow due to extended reasoning; non-thinking instruction models work best for this structured extraction task.
+
+**Requirements:** [ollama](https://ollama.com) must be installed and running (`ollama serve`). Pull the model before first use:
+
+```bash
+ollama pull qwen2.5-coder:7b
+```
+
+If ollama is unreachable the pipeline prints a warning and continues without expansion.
+
+Expanded terms appear in the console output and in the `match_report.md` under **LLM-Expanded Keywords**.
 
 ## Output
 
