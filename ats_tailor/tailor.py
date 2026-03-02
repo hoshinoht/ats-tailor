@@ -73,6 +73,21 @@ def compute_keyword_bonus(keywords, jd_lower, jd_text=""):
     return min(matches * 0.06, 0.20)
 
 
+def compute_tag_overlap_bonus(tags, jd_lower, jd_text=""):
+    """Bonus for proportion of an item's tags that appear in the JD.
+
+    Unlike keyword_bonus (which caps at 4 matches), this rewards items
+    whose *entire tag set* aligns with the JD — i.e. domain relevance.
+    A project where 8/10 tags match the JD scores higher than one where
+    only 2/10 match, even if both hit the keyword_bonus cap.
+    """
+    if not tags:
+        return 0.0
+    hits = sum(1 for t in tags if keyword_in_text(t, jd_lower, jd_text))
+    ratio = hits / len(tags)
+    return ratio * 0.25  # max 0.25 when 100% of tags match
+
+
 def parse_end_date(period):
     """Extract the most recent date from a period string."""
     if "present" in period.lower():
@@ -689,7 +704,9 @@ def main():
     role_texts = [build_role_text(r) for r in roles]
     role_embeddings = model.encode(role_texts)
     role_scores = [
-        (score_against_jd(jd_embeddings, e) + compute_keyword_bonus(r.get("ats_tags", []), jd_lower, jd_text))
+        (score_against_jd(jd_embeddings, e)
+         + compute_keyword_bonus(r.get("ats_tags", []), jd_lower, jd_text)
+         + compute_tag_overlap_bonus(r.get("ats_tags", []), jd_lower, jd_text))
         * recency_multiplier(r["period"])
         for r, e in zip(roles, role_embeddings)
     ]
@@ -697,7 +714,9 @@ def main():
     proj_texts = [build_project_text(p) for p in projects]
     proj_embeddings = model.encode(proj_texts)
     proj_scores = [
-        (score_against_jd(jd_embeddings, e) + compute_keyword_bonus(p.get("ats_tags", []), jd_lower, jd_text))
+        (score_against_jd(jd_embeddings, e)
+         + compute_keyword_bonus(p.get("ats_tags", []), jd_lower, jd_text)
+         + compute_tag_overlap_bonus(p.get("ats_tags", []), jd_lower, jd_text))
         * recency_multiplier(p["period"])
         for p, e in zip(projects, proj_embeddings)
     ]

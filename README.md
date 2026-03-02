@@ -80,11 +80,12 @@ cd editor && go build -o yamledit .
 ## Scoring
 
 ```
-score(i) = (semantic(i) + keyword_bonus(i)) * recency(i)
+score(i) = (semantic(i) + keyword_bonus(i) + tag_overlap(i)) * recency(i)
 ```
 
 - **Semantic** -- max-pooled cosine similarity between JD chunks and item embedding
 - **Keyword bonus** -- +0.06 per exact ATS keyword match (capped at +0.20)
+- **Tag overlap** -- proportion of item's ATS tags found in JD, scaled to max +0.25
 - **Recency** -- x1.10 current, x1.05 <12mo, x1.02 <24mo, x1.00 older
 
 See [docs/algorithm.pdf](docs/algorithm.pdf) for the full writeup.
