@@ -44,6 +44,8 @@ cp .env.example .env
 |----------|---------|--------------|
 | `ATS_EMBED_MODEL` | `all-MiniLM-L12-v2` | `--model` |
 | `ATS_LLM_MODEL` | *(disabled)* | `--llm` |
+| `ATS_LLM_NUM_CTX` | `4096` | — |
+| `ATS_LLM_TWO_PASS` | `false` | — |
 | `ATS_RERANK` | `false` | `--rerank` |
 | `ATS_MAX_EXPERIENCE` | `3` | — |
 | `ATS_MAX_PROJECTS` | `4` | — |
@@ -71,17 +73,19 @@ python -m ats_tailor.tailor --llm qwen2.5-coder:1.5b ...
 python -m ats_tailor.tailor ...
 ```
 
-**Default model:** `qwen2.5-coder:7b` (~4.7 GB download, ~5s per JD). Produces 20-25 focused technical terms with minimal noise.
+**Default model:** `qwen3.5:9b` (~6.6 GB). Thinking is disabled; output capped at 512 tokens. Context window defaults to 4096 (`ATS_LLM_NUM_CTX`).
 
-**Choosing a model:** Any ollama model works. Smaller models like `qwen2.5-coder:1.5b` (~1 GB, ~2s) are faster but produce noisier output (soft skills, generic terms). Thinking models like `qwen3` tend to be slow due to extended reasoning; non-thinking instruction models work best for this structured extraction task.
+**Category-aware prompting.** The candidate's skill category names are injected into the prompt so the LLM prioritizes terms the candidate can actually match, while still including important terms outside those areas.
+
+**Two-pass mode** (`ATS_LLM_TWO_PASS=true`). Uses two LLM calls: pass 1 infers the 3-5 most relevant domains from the candidate's skill categories, pass 2 expands keywords scoped to those domains. ~2x latency but more targeted results on generic JDs. Falls back to single-pass automatically on failure.
 
 **Requirements:** [ollama](https://ollama.com) must be installed and running (`ollama serve`). Pull the model before first use:
 
 ```bash
-ollama pull qwen2.5-coder:7b
+ollama pull qwen3.5:9b
 ```
 
-If ollama is unreachable the pipeline prints a warning and continues without expansion.
+If ollama is unreachable the pipeline prints a warning and continues without expansion. Token usage is logged to stderr after each LLM call.
 
 Expanded terms appear in the console output and in the `match_report.md` under **LLM-Expanded Keywords**.
 
@@ -105,34 +109,6 @@ See `examples/index/` for the expected YAML structure:
 
 To start with your own data, copy `examples/`, fill in your details, and run against real job descriptions.
 
-## Editor
-
-Browser-based editor for the YAML index. Provides structured editing with live validation; changes write directly to disk.
-
-### Docker
-
-```bash
-docker compose up --build    # serves at localhost:8070
-```
-
-The compose file mounts `../index` into the container. For standalone use, override the volume:
-
-```bash
-docker compose run -v /path/to/index:/data/index editor
-```
-
-### Local
-
-Requires Go 1.22+.
-
-```bash
-cd editor && go build -o yamledit .
-./yamledit                       # auto-detects <git-root>/index
-./yamledit -dir /path/to/index   # explicit path
-./yamledit -port 9090            # custom port (default 8070)
-./yamledit -no-browser           # skip auto-open
-```
-
 ## Scoring
 
 ```
@@ -140,7 +116,7 @@ score(i) = (semantic(i) + keyword_bonus(i) + tag_overlap(i)) * recency(i)
 ```
 
 - **Semantic** -- max-pooled cosine similarity between JD chunks and item embedding
-- **Keyword bonus** -- +0.06 per exact ATS keyword match (capped at +0.20)
+- **Keyword bonus** -- `0.06 * log2(1 + matches)` (logarithmic, no hard cap)
 - **Tag overlap** -- proportion of item's ATS tags found in JD, scaled to max +0.25
 - **Recency** -- x1.10 current, x1.05 <12mo, x1.02 <24mo, x1.00 older
 
