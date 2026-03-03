@@ -28,7 +28,33 @@ python -m ats_tailor.tailor \
 | `--index` | `index/` | YAML index directory |
 | `--profile` | `profile.yaml` next to index | Profile YAML (name, email, links) |
 | `--output` | `output/{company}-{role}` | Output directory |
+| `--model` | `all-MiniLM-L12-v2` | SentenceTransformer model name |
 | `--llm` | off | Expand JD keywords via local LLM (see below) |
+| `--rerank` | off | Re-score top candidates with a cross-encoder |
+
+## Configuration
+
+All CLI flags can be set via a `.env` file in the ats-tailor repo root. Copy `.env.example` to `.env` and edit:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Default | CLI override |
+|----------|---------|--------------|
+| `ATS_EMBED_MODEL` | `all-MiniLM-L12-v2` | `--model` |
+| `ATS_LLM_MODEL` | *(disabled)* | `--llm` |
+| `ATS_RERANK` | `false` | `--rerank` |
+| `ATS_MAX_EXPERIENCE` | `3` | — |
+| `ATS_MAX_PROJECTS` | `4` | — |
+| `ATS_MIN_PROJECTS` | `4` | — |
+| `ATS_MAX_SKILL_LINES` | `4` | — |
+| `ATS_MAX_PROJECT_BULLETS` | `3` | — |
+| `ATS_MAX_EXP_BULLETS` | `3` | — |
+| `ATS_CHARS_PER_BULLET_LINE` | `80` | — |
+| `ATS_MAX_PAGE_LINES` | `72` | — |
+
+CLI flags override env vars; env vars override `.env` file values.
 
 ## LLM keyword expansion
 

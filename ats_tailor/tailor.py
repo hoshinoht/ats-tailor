@@ -26,8 +26,8 @@ from .scoring import (
     score_against_jd,
     score_against_jd_multi,
 )
+from .config import EMBED_MODEL, LLM_MODEL, MAX_PAGE_LINES, MIN_PROJECTS, RERANK
 from .selection import (
-    MIN_PROJECTS,
     estimate_line_count,
     select_certifications,
     select_experience,
@@ -75,10 +75,13 @@ def main():
                         help="Path to YAML index directory (default: index/)")
     parser.add_argument("--profile", type=str, default=None,
                         help="Path to profile.yaml (default: profile.yaml next to index dir)")
-    parser.add_argument("--llm", nargs="?", const="qwen3.5:4b", default=None,
-                        help="Expand JD keywords via ollama LLM (default model: qwen3.5:4b)")
-    parser.add_argument("--rerank", action="store_true", default=False,
-                        help="Re-score top candidates with a cross-encoder for precision")
+    parser.add_argument("--llm", nargs="?", const=LLM_MODEL or "qwen3.5:4b",
+                        default=LLM_MODEL,
+                        help="Expand JD keywords via ollama LLM (env: ATS_LLM_MODEL)")
+    parser.add_argument("--model", type=str, default=EMBED_MODEL,
+                        help=f"SentenceTransformer model name (env: ATS_EMBED_MODEL, default: {EMBED_MODEL})")
+    parser.add_argument("--rerank", action="store_true", default=RERANK,
+                        help="Re-score top candidates with a cross-encoder (env: ATS_RERANK)")
     args = parser.parse_args()
 
     if not args.company or not args.role:
@@ -146,8 +149,8 @@ def main():
             jd_lower = jd_text.lower()
 
     # ── Load model & embed ──
-    print("Loading embedding model (first run downloads ~22MB)...")
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+    print(f"Loading embedding model ({args.model})...")
+    model = SentenceTransformer(args.model)
 
     print("Embedding job description...")
     jd_chunks = chunk_text(jd_text)
@@ -262,7 +265,7 @@ def main():
 
     # ── Budget check (lax: trim bullets first, drop projects only as last resort) ──
     line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
-    max_lines = 72
+    max_lines = MAX_PAGE_LINES
 
     # Pass 1: trim to 2 bullets per project
     if line_est > max_lines:

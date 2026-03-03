@@ -4,20 +4,18 @@ import math
 
 import numpy as np
 
+from .config import (
+    CHARS_PER_BULLET_LINE,
+    MAX_EXPERIENCE,
+    MAX_PROJECTS,
+    MAX_SKILL_LINES,
+)
 from .scoring import (
     build_skill_text,
     compute_keyword_bonus,
     cosine_sim,
     score_against_jd,
 )
-
-MAX_EXPERIENCE = 3
-MAX_PROJECTS = 4
-MIN_PROJECTS = 4
-MAX_SKILL_LINES = 4
-MAX_PROJECT_BULLETS = 3  # per project
-MAX_EXP_BULLETS = 3  # per role
-CHARS_PER_BULLET_LINE = 80  # approx chars before LaTeX wraps a bullet
 
 PROF_RANK = {"advanced": 0, "intermediate": 1, "familiar": 2}
 
