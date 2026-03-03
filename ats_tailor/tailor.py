@@ -297,7 +297,7 @@ _GAP_STOPWORDS = {
     "Big", "End", "Top", "Set", "Run", "Use", "Get", "Let", "Put",
     "Say", "See", "Try", "Ask", "Need", "Want", "Like", "Make",
     "Take", "Give", "Come", "Work", "Know", "Think", "Help", "Join",
-    "Lead", "Build", "Drive", "Create", "Develop", "Design", "Manage",
+    "Lead", "Leadership", "Build", "Drive", "Create", "Develop", "Design", "Manage",
     "Support", "Ensure", "Provide", "Maintain", "Implement", "Deliver",
     "Collaborate", "Contribute", "Communicate", "Analyse", "Analyze",
     "Review", "Apply", "Experience", "Ability", "Skills", "Team",
@@ -306,6 +306,26 @@ _GAP_STOPWORDS = {
     "Principal", "Staff", "Intern", "Associate", "Manager", "Director",
     "Engineer", "Developer", "Analyst", "Scientist", "Architect",
     "Consultant", "Specialist", "Coordinator", "Administrator",
+    # Process & methodology
+    "Application", "Process", "Requirements", "Responsibilities",
+    "Technical", "Knowledge", "Domain", "Modelling", "Modeling",
+    "Methodology", "Practice", "Practices", "Approach", "Framework",
+    "Integration", "Delivery", "Continuous", "Driven", "Oriented",
+    # Action verbs & gerunds
+    "Championing", "Collaborating", "Empathising", "Empathizing",
+    "Understanding", "Understand", "Writing", "Learning", "Applying",
+    "Developing", "Building", "Solving", "Working", "Using",
+    "Including", "Following", "Conducting", "Performing", "Executing",
+    # Recruitment & JD boilerplate
+    "Interview", "Resume", "Call", "Round", "Mandatory", "Introductory",
+    "Exercise", "Candidate", "Candidates", "Attachment", "Period",
+    "Gauge", "Proficiency", "Exposure", "Gain", "Gained",
+    "Experiences", "Proactive", "Pre", "Minimally",
+    # Misc generic
+    "PDF", "Roles", "Certain", "Various", "Different", "Least",
+    "Appropriate", "Meaningful", "Challenging", "Complex",
+    "Alongside", "Order", "Right", "Industry", "Leading",
+    "Business", "Stakeholders", "Products", "Solutions", "Value",
 }
 
 
@@ -353,7 +373,8 @@ def expand_jd_with_llm(jd_text, model_name):
         return ""
 
 
-def detect_coverage_gaps(jd_text, skills_data, projects_data, exp_data, certs_data):
+def detect_coverage_gaps(jd_text, skills_data, projects_data, exp_data, certs_data,
+                         extra_known=None):
     """Find tech-looking terms in the JD that aren't in any index file."""
     known = set()
     for cat in skills_data.get("categories", []):
@@ -375,6 +396,22 @@ def detect_coverage_gaps(jd_text, skills_data, projects_data, exp_data, certs_da
     for cert in certs_data.get("certifications", []):
         for kw in cert.get("ats_keywords", []):
             known.add(kw.lower())
+
+    # Split compound terms so "CI/CD" also marks "CI" and "CD" as known
+    known_words = set()
+    for term in known:
+        for word in re.split(r"[\s/\-]+", term):
+            if len(word) > 1:
+                known_words.add(word)
+    known.update(known_words)
+
+    # Extra known terms (e.g. company/role names from CLI args)
+    if extra_known:
+        for term in extra_known:
+            known.add(term.lower())
+            for word in re.split(r"[\s/\-]+", term.lower()):
+                if len(word) > 1:
+                    known.add(word)
 
     candidates = set()
     candidates.update(re.findall(r"\b([A-Z][A-Z0-9]{1,5})\b", jd_text))
@@ -783,7 +820,8 @@ def main():
 
     # ── Coverage gap detection (before LLM expansion, so gaps reflect original JD) ──
     gaps = detect_coverage_gaps(
-        jd_text, skills_data, projects_data, exp_data, certs_data)
+        jd_text, skills_data, projects_data, exp_data, certs_data,
+        extra_known=[args.company, args.role])
     if gaps:
         print(
             f"  Warning: {len(gaps)} JD term(s) not in index: {', '.join(gaps)}")
