@@ -345,11 +345,13 @@ def expand_jd_with_llm(jd_text, model_name):
         f"Job description:\n{jd_text}"
     )
     payload = json.dumps(
-        {"model": model_name, "prompt": prompt, "stream": False}).encode()
+        {"model": model_name, "prompt": prompt, "stream": False,
+         "options": {"num_predict": 512},
+         "think": False}).encode()
     try:
         req = Request("http://localhost:11434/api/generate", data=payload,
                       headers={"Content-Type": "application/json"})
-        with urlopen(req, timeout=120) as resp:
+        with urlopen(req, timeout=300) as resp:
             raw = json.loads(resp.read())["response"]
         # Extract JSON array (model may wrap it in markdown fences or thinking tags)
         match = re.search(r"\[.*\]", raw, re.DOTALL)
@@ -769,8 +771,8 @@ def main():
                         help="Path to YAML index directory (default: index/)")
     parser.add_argument("--profile", type=str, default=None,
                         help="Path to profile.yaml (default: profile.yaml next to index dir)")
-    parser.add_argument("--llm", nargs="?", const="qwen2.5-coder:7b", default=None,
-                        help="Expand JD keywords via ollama LLM (default model: qwen2.5-coder:7b)")
+    parser.add_argument("--llm", nargs="?", const="qwen3.5:9b", default=None,
+                        help="Expand JD keywords via ollama LLM (default model: qwen3.5:9b)")
     args = parser.parse_args()
 
     if not args.company or not args.role:
