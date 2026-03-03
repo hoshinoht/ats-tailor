@@ -15,6 +15,7 @@ import yaml
 import numpy as np
 import matplotlib.pyplot as plt
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -72,7 +73,7 @@ def compute_keyword_bonus(keywords, jd_lower, jd_text=""):
     """Bonus score for exact keyword matches found in JD text."""
     matches = sum(1 for kw in keywords if keyword_in_text(
         kw, jd_lower, jd_text))
-    return min(matches * 0.06, 0.20)
+    return 0.06 * math.log2(1 + matches) if matches else 0.0
 
 
 def compute_tag_overlap_bonus(tags, jd_lower, jd_text=""):
@@ -198,6 +199,86 @@ def cosine_sim(a, b):
 def score_against_jd(jd_embeddings, item_embedding):
     """Max-pooled cosine similarity: best match across JD sentences."""
     return max(cosine_sim(jd_emb, item_embedding) for jd_emb in jd_embeddings)
+
+
+def score_against_jd_multi(jd_embeddings, item_embeddings, jd_weights=None):
+    """Fixed 60/40 metadata-anchored scoring.
+
+    metadata_score (idx 0) always contributes 60% of the semantic score,
+    mean of bullet scores contributes 40%. This keeps the overall project
+    relevance dominant regardless of how many bullets an item has.
+    """
+    if jd_weights is None:
+        jd_weights = np.ones(len(jd_embeddings))
+
+    def _max_sim(emb):
+        sims = np.array([cosine_sim(jd_emb, emb) for jd_emb in jd_embeddings])
+        return float(np.max(sims * jd_weights))
+
+    meta_score = _max_sim(item_embeddings[0])
+    if len(item_embeddings) == 1:
+        return meta_score
+    bullet_scores = [_max_sim(emb) for emb in item_embeddings[1:]]
+    return 0.6 * meta_score + 0.4 * float(np.mean(bullet_scores))
+
+
+def build_item_vectors(item, kind, model):
+    """Encode item as multiple vectors: metadata text + each bullet separately."""
+    if kind == "project":
+        meta = build_project_text(item)
+        bullets = item.get("responsibilities", []) + item.get("impact", [])
+    else:  # role
+        meta = build_role_text(item)
+        bullets = item.get("bullets", [])
+    texts = [meta] + [b for b in bullets if b.strip()]
+    return model.encode(texts)
+
+
+def compute_jd_weights(chunks):
+    """Return per-chunk importance weights. Requirement-like sections get 1.5x."""
+    req_pattern = re.compile(
+        r"requirement|qualification|responsibilities|what you.ll|must have|skills",
+        re.IGNORECASE,
+    )
+    weights = []
+    in_req_section = False
+    for chunk in chunks:
+        is_header = (
+            chunk.endswith(":") or chunk.startswith("#")
+            or (len(chunk.split()) <= 6 and chunk[0:1].isupper())
+        )
+        if is_header and req_pattern.search(chunk):
+            in_req_section = True
+        elif is_header and not req_pattern.search(chunk):
+            in_req_section = False
+        weights.append(1.5 if in_req_section else 1.0)
+    return np.array(weights)
+
+
+# ── Embedding cache ───────────────────────────────────────────────────────────
+def _yaml_hash(data):
+    """SHA-256 hash of YAML-serializable data for cache keying."""
+    raw = yaml.dump(data, sort_keys=True).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _text_hash(text):
+    """SHA-256 hash of a string."""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def load_cached_embeddings(cache_dir, key):
+    """Load cached embeddings if they exist on disk."""
+    path = cache_dir / f"{key}.npy"
+    if path.exists():
+        return np.load(path)
+    return None
+
+
+def save_cached_embeddings(cache_dir, key, embeddings):
+    """Save embeddings to disk cache."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    np.save(cache_dir / f"{key}.npy", embeddings)
 
 
 # ── Selection logic ────────────────────────────────────────────────────────────
@@ -773,6 +854,8 @@ def main():
                         help="Path to profile.yaml (default: profile.yaml next to index dir)")
     parser.add_argument("--llm", nargs="?", const="qwen3.5:9b", default=None,
                         help="Expand JD keywords via ollama LLM (default model: qwen3.5:9b)")
+    parser.add_argument("--rerank", action="store_true", default=False,
+                        help="Re-score top candidates with a cross-encoder for precision")
     args = parser.parse_args()
 
     if not args.company or not args.role:
@@ -845,46 +928,105 @@ def main():
 
     print("Embedding job description...")
     jd_chunks = chunk_text(jd_text)
-    jd_embeddings = model.encode(jd_chunks)
+    jd_weights = compute_jd_weights(jd_chunks)
+    jd_cache_dir = out_dir
+    jd_cache_key = f"jd_{_text_hash(jd_text)[:16]}"
+    jd_embeddings = load_cached_embeddings(jd_cache_dir, jd_cache_key)
+    if jd_embeddings is None:
+        jd_embeddings = model.encode(jd_chunks)
+        save_cached_embeddings(jd_cache_dir, jd_cache_key, jd_embeddings)
+    else:
+        print("  (using cached JD embeddings)")
 
     # ── Score everything (hybrid: semantic + keyword + recency) ──
     print("Scoring candidates...")
+    emb_cache_dir = index_dir / ".emb_cache"
 
-    role_texts = [build_role_text(r) for r in roles]
-    role_embeddings = model.encode(role_texts)
-    role_scores = [
-        (score_against_jd(jd_embeddings, e)
-         + compute_keyword_bonus(r.get("ats_tags", []), jd_lower, jd_text)
-         + compute_tag_overlap_bonus(r.get("ats_tags", []), jd_lower, jd_text))
-        * recency_multiplier(r["period"])
-        for r, e in zip(roles, role_embeddings)
-    ]
+    role_scores = []
+    for r in roles:
+        cache_key = f"role_{r['id']}_{_yaml_hash(r)[:16]}_mv"
+        cached = load_cached_embeddings(emb_cache_dir, cache_key)
+        if cached is not None:
+            r_embeds = cached
+        else:
+            r_embeds = build_item_vectors(r, "role", model)
+            save_cached_embeddings(emb_cache_dir, cache_key, r_embeds)
+        sem = score_against_jd_multi(jd_embeddings, r_embeds, jd_weights)
+        kw = compute_keyword_bonus(r.get("ats_tags", []), jd_lower, jd_text)
+        tag = compute_tag_overlap_bonus(r.get("ats_tags", []), jd_lower, jd_text)
+        role_scores.append((sem + kw + tag) * recency_multiplier(r["period"]))
 
-    proj_texts = [build_project_text(p) for p in projects]
-    proj_embeddings = model.encode(proj_texts)
-    proj_scores = [
-        (score_against_jd(jd_embeddings, e)
-         + compute_keyword_bonus(p.get("ats_tags", []), jd_lower, jd_text)
-         + compute_tag_overlap_bonus(p.get("ats_tags", []), jd_lower, jd_text))
-        * recency_multiplier(p["period"])
-        for p, e in zip(projects, proj_embeddings)
-    ]
+    proj_scores = []
+    for p in projects:
+        cache_key = f"proj_{p['id']}_{_yaml_hash(p)[:16]}_mv"
+        cached = load_cached_embeddings(emb_cache_dir, cache_key)
+        if cached is not None:
+            p_embeds = cached
+        else:
+            p_embeds = build_item_vectors(p, "project", model)
+            save_cached_embeddings(emb_cache_dir, cache_key, p_embeds)
+        sem = score_against_jd_multi(jd_embeddings, p_embeds, jd_weights)
+        kw = compute_keyword_bonus(p.get("ats_tags", []), jd_lower, jd_text)
+        tag = compute_tag_overlap_bonus(p.get("ats_tags", []), jd_lower, jd_text)
+        proj_scores.append((sem + kw + tag) * recency_multiplier(p["period"]))
 
-    cert_texts = [build_cert_text(c) for c in certs]
-    cert_embeddings = model.encode(cert_texts)
-    cert_scores = [
-        score_against_jd(jd_embeddings, e) +
-        compute_keyword_bonus(c.get("ats_keywords", []), jd_lower, jd_text)
-        for c, e in zip(certs, cert_embeddings)
-    ]
+    cert_scores = []
+    for c in certs:
+        cache_key = f"cert_{c['id']}_{_yaml_hash(c)[:16]}"
+        cached = load_cached_embeddings(emb_cache_dir, cache_key)
+        if cached is not None:
+            c_emb = cached
+        else:
+            c_emb = model.encode(build_cert_text(c))
+            save_cached_embeddings(emb_cache_dir, cache_key, c_emb)
+        sem = score_against_jd(jd_embeddings, c_emb)
+        kw = compute_keyword_bonus(c.get("ats_keywords", []), jd_lower, jd_text)
+        cert_scores.append(sem + kw)
 
-    # ── Select ──
+    # ── Select (skills first for evidence backlinks) ──
     print("Selecting best content...")
-    sel_roles, sel_role_scores = select_experience(roles, role_scores)
-    sel_projects, sel_proj_scores = select_projects(projects, proj_scores)
     skill_lines, all_skill_scores = select_skills(
         categories, jd_embeddings, model, jd_lower, jd_text)
+
+    # ── Skill evidence backlinks ──
+    evidence_bonus = {}
+    for skill_name, _cat_name, score in all_skill_scores:
+        if score < 0.3:
+            continue
+        for cat in categories:
+            for skill in cat["skills"]:
+                if skill["name"] == skill_name:
+                    for ev in skill.get("evidence", []):
+                        ref = ev.get("ref", "")
+                        bonus = min(score * 0.05, 0.05)
+                        evidence_bonus[ref] = evidence_bonus.get(ref, 0) + bonus
+    for i, p in enumerate(projects):
+        if p["id"] in evidence_bonus:
+            proj_scores[i] += evidence_bonus[p["id"]]
+    for i, r in enumerate(roles):
+        if r["id"] in evidence_bonus:
+            role_scores[i] += evidence_bonus[r["id"]]
+
+    sel_roles, sel_role_scores = select_experience(roles, role_scores)
+    sel_projects, sel_proj_scores = select_projects(projects, proj_scores)
     sel_certs = select_certifications(certs, cert_scores)
+
+    # ── Cross-encoder reranking ──
+    if args.rerank:
+        print("Cross-encoder reranking top candidates...")
+        from sentence_transformers import CrossEncoder
+        ce_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        top_n = min(10, len(projects))
+        ranked_indices = sorted(
+            range(len(projects)), key=lambda i: proj_scores[i], reverse=True
+        )[:top_n]
+        ce_pairs = [(jd_text, build_project_text(projects[i])) for i in ranked_indices]
+        ce_scores_arr = ce_model.predict(ce_pairs)
+        # Sigmoid-normalize logits to [0,1] before blending
+        ce_norm = [1.0 / (1.0 + math.exp(-float(s))) for s in ce_scores_arr]
+        for idx, ce_s in zip(ranked_indices, ce_norm):
+            proj_scores[idx] += ce_s * 0.15
+        sel_projects, sel_proj_scores = select_projects(projects, proj_scores)
 
     # ── Build contexts ──
     exp_ctx = [build_role_context(r) for r in sel_roles]
