@@ -34,6 +34,8 @@ def _str(key, default):
 # Embedding & LLM
 EMBED_MODEL = _str("ATS_EMBED_MODEL", "all-MiniLM-L12-v2")
 LLM_MODEL = os.environ.get("ATS_LLM_MODEL")  # None = disabled
+LLM_NUM_CTX = _int("ATS_LLM_NUM_CTX", 4096)
+LLM_TWO_PASS = os.environ.get("ATS_LLM_TWO_PASS", "").lower() in ("1", "true", "yes")
 RERANK = os.environ.get("ATS_RERANK", "").lower() in ("1", "true", "yes")
 
 # Page budget

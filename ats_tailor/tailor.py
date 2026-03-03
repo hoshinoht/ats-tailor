@@ -141,7 +141,9 @@ def main():
     llm_terms = None
     if args.llm:
         print(f"Expanding JD keywords via ollama ({args.llm})...")
-        expanded = expand_jd_with_llm(jd_text, args.llm)
+        expanded = expand_jd_with_llm(
+            jd_text, args.llm,
+            categories=[cat["name"] for cat in categories])
         if expanded:
             llm_terms = [t.strip() for t in expanded.split("\n") if t.strip()]
             print(f"  LLM expanded terms: {', '.join(llm_terms)}")
