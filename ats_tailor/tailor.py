@@ -9,6 +9,11 @@ Usage:
     python -m ats_tailor.tailor --profile profile.yaml --index index/ --jd jd.txt --company acme --role backend
 """
 
+from sentence_transformers import SentenceTransformer
+from jinja2 import Environment, FileSystemLoader
+import yaml
+import numpy as np
+import matplotlib.pyplot as plt
 import argparse
 import json
 import math
@@ -20,19 +25,14 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
-import yaml
-from jinja2 import Environment, FileSystemLoader
-from sentence_transformers import SentenceTransformer
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 PKG_DIR = Path(__file__).resolve().parent
 
 # ── Page budget (approximate line counts for 1 A4 page at 10pt) ────────────
-MAX_EXPERIENCE = 2
+MAX_EXPERIENCE = 3
 MAX_PROJECTS = 4
-MIN_PROJECTS = 3
+MIN_PROJECTS = 4
 MAX_SKILL_LINES = 4
 MAX_PROJECT_BULLETS = 3  # per project
 MAX_EXP_BULLETS = 3  # per role
@@ -70,7 +70,8 @@ def keyword_in_text(keyword, text_lower, text_original=""):
 
 def compute_keyword_bonus(keywords, jd_lower, jd_text=""):
     """Bonus score for exact keyword matches found in JD text."""
-    matches = sum(1 for kw in keywords if keyword_in_text(kw, jd_lower, jd_text))
+    matches = sum(1 for kw in keywords if keyword_in_text(
+        kw, jd_lower, jd_text))
     return min(matches * 0.06, 0.20)
 
 
@@ -130,7 +131,13 @@ def load_index(index_dir):
         exp_data = yaml.safe_load(f)
     with open(index_dir / "certifications.yaml") as f:
         certs_data = yaml.safe_load(f)
-    return skills_data, projects_data, exp_data, certs_data
+    summary_path = index_dir / "summary.yaml"
+    if summary_path.exists():
+        with open(summary_path) as f:
+            summary_data = yaml.safe_load(f)
+    else:
+        summary_data = None
+    return skills_data, projects_data, exp_data, certs_data, summary_data
 
 
 def load_profile(profile_path):
@@ -220,22 +227,26 @@ def select_skills(categories, jd_embeddings, model, jd_lower, jd_text="", max_li
             text = build_skill_text(skill)
             emb = model.encode(text)
             sem = score_against_jd(jd_embeddings, emb)
-            kw = compute_keyword_bonus(skill.get("ats_keywords", []), jd_lower, jd_text)
+            kw = compute_keyword_bonus(
+                skill.get("ats_keywords", []), jd_lower, jd_text)
             score = sem + kw
             skill_rankings.append((skill, score))
             all_skill_scores.append((skill["name"], cat["name"], score))
 
         skill_rankings.sort(
-            key=lambda x: (PROF_RANK.get(x[0].get("proficiency", "familiar"), 2), -x[1])
+            key=lambda x: (PROF_RANK.get(
+                x[0].get("proficiency", "familiar"), 2), -x[1])
         )
         top5_scores = sorted([s for _, s in skill_rankings], reverse=True)[:5]
         avg_score = np.mean(top5_scores) if top5_scores else 0
 
         if cat["name"] == "Programming Languages":
-            top_skills = [s["name"] for s, sc in skill_rankings[:12] if sc > 0.1]
+            top_skills = [s["name"]
+                          for s, sc in skill_rankings[:12] if sc > 0.1]
             if not top_skills:
                 top_skills = [s["name"] for s, _ in skill_rankings[:6]]
-            lang_line = {"category": "Languages", "skills": ", ".join(top_skills)}
+            lang_line = {"category": "Languages",
+                         "skills": ", ".join(top_skills)}
         else:
             cat_scores.append((cat, skill_rankings, avg_score))
 
@@ -313,7 +324,8 @@ def expand_jd_with_llm(jd_text, model_name):
         "Output ONLY the JSON array.\n\n"
         f"Job description:\n{jd_text}"
     )
-    payload = json.dumps({"model": model_name, "prompt": prompt, "stream": False}).encode()
+    payload = json.dumps(
+        {"model": model_name, "prompt": prompt, "stream": False}).encode()
     try:
         req = Request("http://localhost:11434/api/generate", data=payload,
                       headers={"Content-Type": "application/json"})
@@ -322,7 +334,8 @@ def expand_jd_with_llm(jd_text, model_name):
         # Extract JSON array (model may wrap it in markdown fences or thinking tags)
         match = re.search(r"\[.*\]", raw, re.DOTALL)
         if not match:
-            print(f"  Warning: could not parse LLM response as JSON array", file=sys.stderr)
+            print(f"  Warning: could not parse LLM response as JSON array",
+                  file=sys.stderr)
             return ""
         terms = json.loads(match.group())
         if not isinstance(terms, list):
@@ -365,7 +378,8 @@ def detect_coverage_gaps(jd_text, skills_data, projects_data, exp_data, certs_da
 
     candidates = set()
     candidates.update(re.findall(r"\b([A-Z][A-Z0-9]{1,5})\b", jd_text))
-    candidates.update(re.findall(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", jd_text))
+    candidates.update(re.findall(
+        r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", jd_text))
     candidates.update(re.findall(r"\b([A-Z][a-z]{2,})\b", jd_text))
     candidates.update(re.findall(r"\b(C\+\+|C#|\.NET|F#)\b", jd_text))
 
@@ -436,10 +450,13 @@ def build_role_context(role):
     }
 
 
-def estimate_line_count(experience, projects):
+def estimate_line_count(experience, projects, summary=None):
     """Rough estimate of content lines to check 1-page fit."""
     lines = 0
     lines += 3  # header
+    if summary:
+        lines += 2  # section header + summary text
+        lines += len(summary.get("highlights", []))  # one line per highlight
     lines += 4  # education (2 entries)
     lines += 2  # section headers for exp
     for role in experience:
@@ -452,14 +469,15 @@ def estimate_line_count(experience, projects):
         bullet_lines = sum(
             math.ceil(len(b) / CHARS_PER_BULLET_LINE) for b in proj["bullets"]
         )
-        tech_lines = math.ceil(len(proj.get("tech_line", "")) / CHARS_PER_BULLET_LINE) if proj.get("tech_line") else 1
+        tech_lines = math.ceil(len(proj.get("tech_line", "")) /
+                               CHARS_PER_BULLET_LINE) if proj.get("tech_line") else 1
         lines += 1 + tech_lines + bullet_lines + 1
     lines += 5  # skills section
     lines += 3  # certifications + spacing
     return lines
 
 
-def render_resume(company, role, profile, education, experience, projects, skill_lines, certifications):
+def render_resume(company, role, profile, education, experience, projects, skill_lines, certifications, summary=None):
     """Render the LaTeX resume from the Jinja2 template."""
     env = Environment(
         loader=FileSystemLoader(str(PKG_DIR)),
@@ -482,6 +500,7 @@ def render_resume(company, role, profile, education, experience, projects, skill
         projects=projects,
         skill_lines=skill_lines,
         certifications=certifications,
+        summary=summary,
     )
 
 
@@ -599,8 +618,10 @@ def generate_visualization(
 ):
     """Generate a 4-panel match visualization PNG."""
     fig, axes = plt.subplots(2, 2, figsize=(18, 14))
-    fig.suptitle(f"Match Analysis: {company} – {role}", fontsize=16, fontweight="bold", y=0.98)
-    plt.subplots_adjust(hspace=0.35, wspace=0.45, top=0.93, bottom=0.04, left=0.18, right=0.96)
+    fig.suptitle(f"Match Analysis: {company} – {role}",
+                 fontsize=16, fontweight="bold", y=0.98)
+    plt.subplots_adjust(hspace=0.35, wspace=0.45, top=0.93,
+                        bottom=0.04, left=0.18, right=0.96)
 
     from matplotlib.patches import Patch
 
@@ -609,8 +630,10 @@ def generate_visualization(
     ranked = sorted(zip(projects, proj_scores), key=lambda x: x[1])
     names = [p["name"] for p, _ in ranked]
     scores = [s for _, s in ranked]
-    colors = [SEL_COLOR if p["id"] in sel_proj_ids else UNSEL_COLOR for p, _ in ranked]
-    bars = ax.barh(names, scores, color=colors, edgecolor="white", linewidth=0.5)
+    colors = [SEL_COLOR if p["id"]
+              in sel_proj_ids else UNSEL_COLOR for p, _ in ranked]
+    bars = ax.barh(names, scores, color=colors,
+                   edgecolor="white", linewidth=0.5)
     ax.set_xlabel("Hybrid Score", fontsize=9)
     ax.set_title("Projects", fontsize=12, fontweight="bold")
     ax.set_xlim(0, max(scores) * 1.15 if scores else 1)
@@ -619,7 +642,8 @@ def generate_visualization(
         ax.text(bar.get_width() + 0.005, bar.get_y() + bar.get_height() / 2,
                 f"{score:.3f}", va="center", fontsize=7, color="#374151")
     ax.legend(
-        handles=[Patch(facecolor=SEL_COLOR, label="Selected"), Patch(facecolor=UNSEL_COLOR, label="Not selected")],
+        handles=[Patch(facecolor=SEL_COLOR, label="Selected"), Patch(
+            facecolor=UNSEL_COLOR, label="Not selected")],
         loc="lower right", fontsize=8, framealpha=0.9,
     )
 
@@ -628,8 +652,10 @@ def generate_visualization(
     ranked = sorted(zip(roles, role_scores), key=lambda x: x[1])
     names = [f"{r['title']}\n({r['company']})" for r, _ in ranked]
     scores = [s for _, s in ranked]
-    colors = [SEL_COLOR if r["id"] in sel_role_ids else UNSEL_COLOR for r, _ in ranked]
-    bars = ax.barh(names, scores, color=colors, edgecolor="white", linewidth=0.5)
+    colors = [SEL_COLOR if r["id"]
+              in sel_role_ids else UNSEL_COLOR for r, _ in ranked]
+    bars = ax.barh(names, scores, color=colors,
+                   edgecolor="white", linewidth=0.5)
     ax.set_xlabel("Hybrid Score", fontsize=9)
     ax.set_title("Experience", fontsize=12, fontweight="bold")
     ax.set_xlim(0, max(scores) * 1.15 if scores else 1)
@@ -647,9 +673,11 @@ def generate_visualization(
     s_names = [s[0] for s in sorted_skills]
     s_scores = [s[2] for s in sorted_skills]
     s_colors = [CAT_COLORS.get(s[1], "#9CA3AF") for s in sorted_skills]
-    bars = ax.barh(s_names, s_scores, color=s_colors, edgecolor="white", linewidth=0.5)
+    bars = ax.barh(s_names, s_scores, color=s_colors,
+                   edgecolor="white", linewidth=0.5)
     ax.set_xlabel("Hybrid Score", fontsize=9)
-    ax.set_title(f"Skills (Top {len(sorted_skills)})", fontsize=12, fontweight="bold")
+    ax.set_title(f"Skills (Top {len(sorted_skills)})",
+                 fontsize=12, fontweight="bold")
     ax.set_xlim(0, max(s_scores) * 1.15 if s_scores else 1)
     ax.tick_params(axis="y", labelsize=7)
     for bar, score in zip(bars, s_scores):
@@ -657,7 +685,8 @@ def generate_visualization(
                 f"{score:.3f}", va="center", fontsize=6, color="#374151")
     unique_cats = list(dict.fromkeys(s[1] for s in sorted_skills))
     ax.legend(
-        handles=[Patch(facecolor=CAT_COLORS.get(c, "#9CA3AF"), label=c) for c in unique_cats],
+        handles=[Patch(facecolor=CAT_COLORS.get(c, "#9CA3AF"), label=c)
+                 for c in unique_cats],
         loc="lower right", fontsize=6, framealpha=0.9, ncol=1,
     )
 
@@ -666,9 +695,12 @@ def generate_visualization(
     ranked = sorted(zip(certs, cert_scores), key=lambda x: x[1])
     names = [f"{c['name']}\n({c['issuer']})" for c, _ in ranked]
     scores = [s for _, s in ranked]
-    colors = [SEL_COLOR if c["id"] in sel_cert_ids else UNSEL_COLOR for c, _ in ranked]
-    bars = ax.barh(names, scores, color=colors, edgecolor="white", linewidth=0.5)
-    ax.axvline(x=0.25, color=THRESH_COLOR, linestyle="--", linewidth=1, alpha=0.7, label="Threshold (0.25)")
+    colors = [SEL_COLOR if c["id"]
+              in sel_cert_ids else UNSEL_COLOR for c, _ in ranked]
+    bars = ax.barh(names, scores, color=colors,
+                   edgecolor="white", linewidth=0.5)
+    ax.axvline(x=0.25, color=THRESH_COLOR, linestyle="--",
+               linewidth=1, alpha=0.7, label="Threshold (0.25)")
     ax.set_xlabel("Hybrid Score", fontsize=9)
     ax.set_title("Certifications", fontsize=12, fontweight="bold")
     ax.set_xlim(0, max(scores) * 1.15 if scores else 1)
@@ -686,13 +718,20 @@ def generate_visualization(
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Tailor a resume to a job description")
-    parser.add_argument("--jd", type=str, help="Path to job description text file")
-    parser.add_argument("--company", required=False, help="Company name (used in output path)")
-    parser.add_argument("--role", required=False, help="Role name (used in output path)")
-    parser.add_argument("--output", type=str, help="Output directory (default: output/{company}-{role})")
-    parser.add_argument("--index", type=str, default="index", help="Path to YAML index directory (default: index/)")
-    parser.add_argument("--profile", type=str, default=None, help="Path to profile.yaml (default: profile.yaml next to index dir)")
+    parser = argparse.ArgumentParser(
+        description="Tailor a resume to a job description")
+    parser.add_argument(
+        "--jd", type=str, help="Path to job description text file")
+    parser.add_argument("--company", required=False,
+                        help="Company name (used in output path)")
+    parser.add_argument("--role", required=False,
+                        help="Role name (used in output path)")
+    parser.add_argument(
+        "--output", type=str, help="Output directory (default: output/{company}-{role})")
+    parser.add_argument("--index", type=str, default="index",
+                        help="Path to YAML index directory (default: index/)")
+    parser.add_argument("--profile", type=str, default=None,
+                        help="Path to profile.yaml (default: profile.yaml next to index dir)")
     parser.add_argument("--llm", nargs="?", const="qwen2.5-coder:7b", default=None,
                         help="Expand JD keywords via ollama LLM (default model: qwen2.5-coder:7b)")
     args = parser.parse_args()
@@ -733,7 +772,8 @@ def main():
 
     # ── Load index ──
     print(f"Loading YAML index from {index_dir}...")
-    skills_data, projects_data, exp_data, certs_data = load_index(index_dir)
+    skills_data, projects_data, exp_data, certs_data, summary_data = load_index(
+        index_dir)
 
     categories = skills_data["categories"]
     projects = projects_data["projects"]
@@ -742,9 +782,11 @@ def main():
     certs = certs_data["certifications"]
 
     # ── Coverage gap detection (before LLM expansion, so gaps reflect original JD) ──
-    gaps = detect_coverage_gaps(jd_text, skills_data, projects_data, exp_data, certs_data)
+    gaps = detect_coverage_gaps(
+        jd_text, skills_data, projects_data, exp_data, certs_data)
     if gaps:
-        print(f"  Warning: {len(gaps)} JD term(s) not in index: {', '.join(gaps)}")
+        print(
+            f"  Warning: {len(gaps)} JD term(s) not in index: {', '.join(gaps)}")
 
     # ── Optional LLM keyword expansion ──
     llm_terms = None
@@ -791,7 +833,8 @@ def main():
     cert_texts = [build_cert_text(c) for c in certs]
     cert_embeddings = model.encode(cert_texts)
     cert_scores = [
-        score_against_jd(jd_embeddings, e) + compute_keyword_bonus(c.get("ats_keywords", []), jd_lower, jd_text)
+        score_against_jd(jd_embeddings, e) +
+        compute_keyword_bonus(c.get("ats_keywords", []), jd_lower, jd_text)
         for c, e in zip(certs, cert_embeddings)
     ]
 
@@ -799,27 +842,31 @@ def main():
     print("Selecting best content...")
     sel_roles, sel_role_scores = select_experience(roles, role_scores)
     sel_projects, sel_proj_scores = select_projects(projects, proj_scores)
-    skill_lines, all_skill_scores = select_skills(categories, jd_embeddings, model, jd_lower, jd_text)
+    skill_lines, all_skill_scores = select_skills(
+        categories, jd_embeddings, model, jd_lower, jd_text)
     sel_certs = select_certifications(certs, cert_scores)
 
-    # ── Budget check ──
+    # ── Build contexts ──
     exp_ctx = [build_role_context(r) for r in sel_roles]
     proj_ctx = [build_project_context(p) for p in sel_projects]
 
-    line_est = estimate_line_count(exp_ctx, proj_ctx)
-    max_lines = 55
+    # ── Budget check (lax: trim bullets first, drop projects only as last resort) ──
+    line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
+    max_lines = 72
 
-    while line_est > max_lines and len(proj_ctx) > MIN_PROJECTS:
-        proj_ctx.pop()
-        sel_projects.pop()
-        sel_proj_scores.pop()
-        line_est = estimate_line_count(exp_ctx, proj_ctx)
-
+    # Pass 1: trim to 2 bullets per project
     if line_est > max_lines:
         for p in proj_ctx:
             if len(p["bullets"]) > 2:
                 p["bullets"] = p["bullets"][:2]
-        line_est = estimate_line_count(exp_ctx, proj_ctx)
+        line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
+
+    # Pass 2: drop lowest-scoring projects if still over
+    while line_est > max_lines and len(proj_ctx) > MIN_PROJECTS:
+        proj_ctx.pop()
+        sel_projects.pop()
+        sel_proj_scores.pop()
+        line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
 
     print(f"  Estimated lines: {line_est} (budget: {max_lines})")
     print(f"  Experience: {len(exp_ctx)} roles")
@@ -838,6 +885,7 @@ def main():
         projects=proj_ctx,
         skill_lines=skill_lines,
         certifications=sel_certs,
+        summary=summary_data,
     )
     (out_dir / "resume.tex").write_text(resume_tex)
 
@@ -853,10 +901,12 @@ def main():
 
     # ── Report ──
     print("Generating match report...")
-    exp_ranked = sorted(zip(roles, role_scores), key=lambda x: x[1], reverse=True)
+    exp_ranked = sorted(zip(roles, role_scores),
+                        key=lambda x: x[1], reverse=True)
     sel_proj_ids = {p["id"] for p in sel_projects}
     proj_ranked = sorted(
-        [(p, s, p["id"] in sel_proj_ids) for p, s in zip(projects, proj_scores)],
+        [(p, s, p["id"] in sel_proj_ids)
+         for p, s in zip(projects, proj_scores)],
         key=lambda x: x[1],
         reverse=True,
     )
@@ -866,7 +916,8 @@ def main():
         for c, s in sorted(zip(certs, cert_scores), key=lambda x: x[1], reverse=True)
     ]
 
-    report = generate_report(args.company, args.role, exp_ranked, proj_ranked, skill_lines, cert_ranked, gaps, llm_terms)
+    report = generate_report(args.company, args.role, exp_ranked,
+                             proj_ranked, skill_lines, cert_ranked, gaps, llm_terms)
     (out_dir / "match_report.md").write_text(report)
 
     # ── Visualization ──
