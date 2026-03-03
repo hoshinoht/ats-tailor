@@ -20,17 +20,17 @@ python -m ats_tailor.tailor \
   --output /tmp/ats-test
 ```
 
-| Arg | Default | Description |
-|-----|---------|-------------|
-| `--jd` | stdin | Job description text file |
-| `--company` | required | Company name |
-| `--role` | required | Role name |
-| `--index` | `index/` | YAML index directory |
-| `--profile` | `profile.yaml` next to index | Profile YAML (name, email, links) |
-| `--output` | `output/{company}-{role}` | Output directory |
-| `--model` | `all-MiniLM-L12-v2` | SentenceTransformer model name |
-| `--llm` | off | Expand JD keywords via local LLM (see below) |
-| `--rerank` | off | Re-score top candidates with a cross-encoder |
+| Arg         | Default                      | Description                                  |
+| ----------- | ---------------------------- | -------------------------------------------- |
+| `--jd`      | stdin                        | Job description text file                    |
+| `--company` | required                     | Company name                                 |
+| `--role`    | required                     | Role name                                    |
+| `--index`   | `index/`                     | YAML index directory                         |
+| `--profile` | `profile.yaml` next to index | Profile YAML (name, email, links)            |
+| `--output`  | `output/{company}-{role}`    | Output directory                             |
+| `--model`   | `all-MiniLM-L12-v2`          | SentenceTransformer model name               |
+| `--llm`     | off                          | Expand JD keywords via local LLM (see below) |
+| `--rerank`  | off                          | Re-score top candidates with a cross-encoder |
 
 ## Configuration
 
@@ -40,21 +40,21 @@ All CLI flags can be set via a `.env` file in the ats-tailor repo root. Copy `.e
 cp .env.example .env
 ```
 
-| Variable | Default | CLI override |
-|----------|---------|--------------|
-| `ATS_EMBED_MODEL` | `all-MiniLM-L12-v2` | `--model` |
-| `ATS_LLM_MODEL` | *(disabled)* | `--llm` |
-| `ATS_LLM_NUM_CTX` | `4096` | — |
-| `ATS_LLM_TWO_PASS` | `false` | — |
-| `ATS_RERANK` | `false` | `--rerank` |
-| `ATS_MAX_EXPERIENCE` | `3` | — |
-| `ATS_MAX_PROJECTS` | `4` | — |
-| `ATS_MIN_PROJECTS` | `4` | — |
-| `ATS_MAX_SKILL_LINES` | `4` | — |
-| `ATS_MAX_PROJECT_BULLETS` | `3` | — |
-| `ATS_MAX_EXP_BULLETS` | `3` | — |
-| `ATS_CHARS_PER_BULLET_LINE` | `80` | — |
-| `ATS_MAX_PAGE_LINES` | `72` | — |
+| Variable                    | Default             | CLI override |
+| --------------------------- | ------------------- | ------------ |
+| `ATS_EMBED_MODEL`           | `all-MiniLM-L12-v2` | `--model`    |
+| `ATS_LLM_MODEL`             | *(disabled)*        | `--llm`      |
+| `ATS_LLM_NUM_CTX`           | `4096`              | —            |
+| `ATS_LLM_TWO_PASS`          | `false`             | —            |
+| `ATS_RERANK`                | `false`             | `--rerank`   |
+| `ATS_MAX_EXPERIENCE`        | `3`                 | —            |
+| `ATS_MAX_PROJECTS`          | `4`                 | —            |
+| `ATS_MIN_PROJECTS`          | `4`                 | —            |
+| `ATS_MAX_SKILL_LINES`       | `4`                 | —            |
+| `ATS_MAX_PROJECT_BULLETS`   | `3`                 | —            |
+| `ATS_MAX_EXP_BULLETS`       | `3`                 | —            |
+| `ATS_CHARS_PER_BULLET_LINE` | `80`                | —            |
+| `ATS_MAX_PAGE_LINES`        | `72`                | —            |
 
 CLI flags override env vars; env vars override `.env` file values.
 
@@ -91,12 +91,12 @@ Expanded terms appear in the console output and in the `match_report.md` under *
 
 ## Output
 
-| File | Description |
-|------|-------------|
-| `resume.tex` | One-page LaTeX resume (compile with `pdflatex`) |
-| `prompt.md` | LLM prompt for optional bullet rewriting |
-| `match_report.md` | Similarity scores and rankings |
-| `match_viz.png` | Visual score breakdown |
+| File              | Description                                     |
+| ----------------- | ----------------------------------------------- |
+| `resume.tex`      | One-page LaTeX resume (compile with `pdflatex`) |
+| `prompt.md`       | LLM prompt for optional bullet rewriting        |
+| `match_report.md` | Similarity scores and rankings                  |
+| `match_viz.png`   | Visual score breakdown                          |
 
 ## Index format
 
@@ -124,4 +124,4 @@ See [docs/algorithm.pdf](docs/algorithm.pdf) for the full writeup.
 
 ## License
 
-MIT
+GPLv3 (see [LICENSE](LICENSE))
