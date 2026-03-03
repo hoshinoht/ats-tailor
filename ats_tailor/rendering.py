@@ -4,7 +4,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from .selection import MAX_PROJECT_BULLETS, MAX_EXP_BULLETS
+from .config import MAX_EXP_BULLETS, MAX_PROJECT_BULLETS
 
 PKG_DIR = Path(__file__).resolve().parent
 
