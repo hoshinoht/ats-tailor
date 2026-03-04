@@ -28,7 +28,7 @@ from .scoring import (
 )
 from . import config
 from .config import (
-    EMBED_MODEL, HF_TOKEN, LLM_MODEL, MAX_PAGE_LINES,
+    EMBED_MODEL, HF_TOKEN, LLM_EXPAND, LLM_MODEL, MAX_PAGE_LINES,
     MIN_EXP_BULLETS, MIN_EXPERIENCE, MIN_PROJECT_BULLETS, MIN_PROJECTS,
     RERANK, SECTION_PRIORITY,
 )
@@ -81,9 +81,9 @@ def main():
                         help="Path to YAML index directory (default: index/)")
     parser.add_argument("--profile", type=str, default=None,
                         help="Path to profile.yaml (default: profile.yaml next to index dir)")
-    parser.add_argument("--llm", nargs="?", const=LLM_MODEL or "qwen3.5:4b",
-                        default=LLM_MODEL,
-                        help="Expand JD keywords via ollama LLM (env: ATS_LLM_MODEL)")
+    parser.add_argument("--llm", nargs="?", const=LLM_MODEL,
+                        default=LLM_MODEL if LLM_EXPAND else None,
+                        help="Expand JD keywords via LLM (env: ATS_LLM_EXPAND + ATS_LLM_MODEL)")
     parser.add_argument("--model", type=str, default=EMBED_MODEL,
                         help=f"SentenceTransformer model name (env: ATS_EMBED_MODEL, default: {EMBED_MODEL})")
     parser.add_argument("--rerank", action="store_true", default=RERANK,

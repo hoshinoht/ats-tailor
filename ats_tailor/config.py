@@ -38,7 +38,8 @@ def _str(key, default):
 
 # Embedding & LLM
 EMBED_MODEL = _str("ATS_EMBED_MODEL", "all-MiniLM-L12-v2")
-LLM_MODEL = os.environ.get("ATS_LLM_MODEL")  # None = disabled
+LLM_EXPAND = os.environ.get("ATS_LLM_EXPAND", "").lower() in ("1", "true", "yes")
+LLM_MODEL = _str("ATS_LLM_MODEL", "qwen3.5:4b")
 LLM_BACKEND = _str("ATS_LLM_BACKEND", "auto")  # auto | mlx | lmstudio | ollama
 MLX_MODEL = _str("ATS_MLX_MODEL", "mlx-community/Qwen3-8B-4bit")
 LMSTUDIO_URL = _str("ATS_LMSTUDIO_URL", "http://localhost:1234")
