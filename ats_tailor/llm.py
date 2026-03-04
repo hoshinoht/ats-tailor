@@ -59,15 +59,17 @@ _GAP_STOPWORDS = {
 }
 
 
-def _ollama_generate(model_name, prompt, label="LLM"):
+def _ollama_generate(model_name, prompt, label="LLM", temperature=None):
     """Send a single prompt to ollama and return the raw response text."""
     from urllib.request import urlopen, Request
     from urllib.error import URLError
 
+    opts = {"num_predict": 512, "num_ctx": config.LLM_NUM_CTX}
+    if temperature is not None:
+        opts["temperature"] = temperature
     payload = json.dumps(
         {"model": model_name, "prompt": prompt, "stream": False,
-         "options": {"num_predict": 512, "num_ctx": config.LLM_NUM_CTX},
-         "think": False}).encode()
+         "options": opts, "think": False}).encode()
     req = Request("http://localhost:11434/api/generate", data=payload,
                   headers={"Content-Type": "application/json"})
     with urlopen(req, timeout=600) as resp:
@@ -79,6 +81,103 @@ def _ollama_generate(model_name, prompt, label="LLM"):
               f"= {p_tok + g_tok} / {config.LLM_NUM_CTX} ctx",
               file=sys.stderr)
     return raw
+
+
+# Module-level cache for MLX model/tokenizer (avoid reloading between passes)
+_mlx_model_cache = {}
+
+
+def _mlx_generate(model_name, prompt, label="LLM", temperature=None):
+    """Generate text using mlx-lm. Raises ImportError if mlx-lm is not installed."""
+    import mlx_lm
+
+    if model_name not in _mlx_model_cache:
+        print(f"  Loading MLX model {model_name}...", file=sys.stderr)
+        model, tokenizer = mlx_lm.load(model_name)
+        _mlx_model_cache[model_name] = (model, tokenizer)
+
+    model, tokenizer = _mlx_model_cache[model_name]
+    kwargs = {"prompt": prompt, "max_tokens": 512, "verbose": False}
+    if temperature is not None:
+        kwargs["temp"] = temperature
+    response = mlx_lm.generate(model, tokenizer, **kwargs)
+    # Estimate token counts for logging
+    p_tok = len(tokenizer.encode(prompt))
+    g_tok = len(tokenizer.encode(response))
+    print(f"  {label} tokens: {p_tok} prompt + {g_tok} generated",
+          file=sys.stderr)
+    return response
+
+
+def _lmstudio_generate(model_name, prompt, label="LLM", temperature=None):
+    """Send a prompt to LM Studio's OpenAI-compatible API."""
+    from urllib.request import urlopen, Request
+    from urllib.error import URLError
+
+    body = {"messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 2048, "temperature": temperature if temperature is not None else 0.3}
+    if model_name:
+        body["model"] = model_name
+    payload = json.dumps(body).encode()
+    url = f"{config.LMSTUDIO_URL}/v1/chat/completions"
+    req = Request(url, data=payload,
+                  headers={"Content-Type": "application/json"})
+    with urlopen(req, timeout=600) as resp:
+        data = json.loads(resp.read())
+        msg = data["choices"][0]["message"]
+        # Prefer separated content (LM Studio reasoning_content setting)
+        raw = msg.get("content") or ""
+        reasoning = msg.get("reasoning_content") or ""
+        if not raw and not reasoning:
+            raw = ""
+        elif not raw and reasoning:
+            # reasoning_content not separated — content has everything
+            pass
+        # Strip <think>…</think> if content wasn't separated
+        if "<think>" in raw:
+            if "</think>" in raw:
+                raw = re.sub(r"<think>.*?</think>\s*",
+                             "", raw, flags=re.DOTALL)
+            else:
+                raw = re.sub(r"<think>.*", "", raw, flags=re.DOTALL)
+        usage = data.get("usage", {})
+        p_tok = usage.get("prompt_tokens", 0)
+        g_tok = usage.get("completion_tokens", 0)
+        thinking_note = f" ({g_tok - len(raw.split())} thinking)" if reasoning else ""
+        print(f"  {label} tokens: {p_tok} prompt + {g_tok} generated{thinking_note}",
+              file=sys.stderr)
+    return raw
+
+
+def _generate(model_name, prompt, label="LLM", temperature=None):
+    """Dispatch to MLX, LM Studio, or Ollama based on config.LLM_BACKEND."""
+    backend = config.LLM_BACKEND
+
+    if backend == "mlx":
+        return _mlx_generate(config.MLX_MODEL, prompt, label, temperature)
+    elif backend == "lmstudio":
+        return _lmstudio_generate(model_name, prompt, label, temperature)
+    elif backend == "ollama":
+        return _ollama_generate(model_name, prompt, label, temperature)
+    else:  # auto
+        from urllib.error import URLError
+        try:
+            return _mlx_generate(config.MLX_MODEL, prompt, label, temperature)
+        except ImportError:
+            print("  MLX not available, trying LM Studio",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"  MLX failed ({e}), trying LM Studio",
+                  file=sys.stderr)
+        try:
+            return _lmstudio_generate(model_name, prompt, label, temperature)
+        except (URLError, OSError):
+            print("  LM Studio not available, falling back to Ollama",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"  LM Studio failed ({e}), falling back to Ollama",
+                  file=sys.stderr)
+        return _ollama_generate(model_name, prompt, label, temperature)
 
 
 def _parse_json_array(raw):
@@ -111,7 +210,18 @@ def expand_jd_with_llm(jd_text, model_name, categories=None):
             return _expand_two_pass(jd_text, model_name, categories)
         return _expand_single_pass(jd_text, model_name, categories)
     except URLError:
-        print("  Warning: cannot reach ollama at localhost:11434 — is it running?",
+        backend = config.LLM_BACKEND
+        if backend == "lmstudio":
+            hint = f"LM Studio at {config.LMSTUDIO_URL}"
+        elif backend == "ollama":
+            hint = "Ollama at localhost:11434"
+        else:
+            hint = "LLM backend (MLX/LM Studio/Ollama)"
+        print(f"  Warning: cannot reach {hint} — is it running?",
+              file=sys.stderr)
+        return ""
+    except ImportError:
+        print("  Warning: LLM backend not available (missing mlx-lm or ollama)",
               file=sys.stderr)
         return ""
     except (json.JSONDecodeError, ValueError, KeyError) as e:
@@ -133,6 +243,8 @@ def _expand_single_pass(jd_text, model_name, categories=None):
             "important terms outside them.\n\n"
         )
 
+    print("Running single-pass LLM expansion...", file=sys.stderr)
+
     prompt = (
         f"{cat_hint}"
         "Given this job description, output a JSON array of 10-25 specific technical "
@@ -144,7 +256,8 @@ def _expand_single_pass(jd_text, model_name, categories=None):
         "Output ONLY the JSON array.\n\n"
         f"Job description:\n{jd_text}"
     )
-    raw = _ollama_generate(model_name, prompt, label="LLM")
+    raw = _generate(model_name, prompt, label="LLM",
+                    temperature=config.LLM_TEMPERATURE)
     terms = _parse_json_array(raw)
     if not terms:
         print("  Warning: could not parse LLM response as JSON array",
@@ -162,6 +275,7 @@ def _expand_two_pass(jd_text, model_name, categories):
     """
     cat_list = ", ".join(categories)
 
+    print("  Running two-pass LLM expansion...", file=sys.stderr)
     # ── Pass 1: domain inference ──
     p1_prompt = (
         "A candidate has skills in these technical domains:\n"
@@ -170,7 +284,8 @@ def _expand_two_pass(jd_text, model_name, categories):
         "domains from the list above. Output ONLY the JSON array.\n\n"
         f"Job description:\n{jd_text}"
     )
-    raw1 = _ollama_generate(model_name, p1_prompt, label="Pass 1 (domains)")
+    raw1 = _generate(model_name, p1_prompt, label="Pass 1 (domains)",
+                     temperature=config.LLM_TEMPERATURE_P1)
     domains = _parse_json_array(raw1)
     if not domains:
         print("  Warning: pass 1 failed, falling back to single-pass",
@@ -200,7 +315,8 @@ def _expand_two_pass(jd_text, model_name, categories):
         "Output ONLY the JSON object.\n\n"
         f"Job description:\n{jd_text}"
     )
-    raw2 = _ollama_generate(model_name, p2_prompt, label="Pass 2 (keywords)")
+    raw2 = _generate(model_name, p2_prompt, label="Pass 2 (keywords)",
+                     temperature=config.LLM_TEMPERATURE_P2)
 
     match = re.search(r"\{.*\}", raw2, re.DOTALL)
     if not match:
@@ -220,7 +336,8 @@ def _expand_two_pass(jd_text, model_name, categories):
         if isinstance(terms, list):
             domain_terms = [str(t) for t in terms if isinstance(t, str)]
             if domain_terms:
-                print(f"    {domain}: {', '.join(domain_terms)}", file=sys.stderr)
+                print(f"    {domain}: {', '.join(domain_terms)}",
+                      file=sys.stderr)
                 all_terms.extend(domain_terms)
 
     if not all_terms:

@@ -27,6 +27,11 @@ def _int(key, default):
     return int(v) if v is not None else default
 
 
+def _float(key, default):
+    v = os.environ.get(key)
+    return float(v) if v is not None else default
+
+
 def _str(key, default):
     return os.environ.get(key, default)
 
@@ -34,7 +39,13 @@ def _str(key, default):
 # Embedding & LLM
 EMBED_MODEL = _str("ATS_EMBED_MODEL", "all-MiniLM-L12-v2")
 LLM_MODEL = os.environ.get("ATS_LLM_MODEL")  # None = disabled
+LLM_BACKEND = _str("ATS_LLM_BACKEND", "auto")  # auto | mlx | lmstudio | ollama
+MLX_MODEL = _str("ATS_MLX_MODEL", "mlx-community/Qwen3-8B-4bit")
+LMSTUDIO_URL = _str("ATS_LMSTUDIO_URL", "http://localhost:1234")
 LLM_NUM_CTX = _int("ATS_LLM_NUM_CTX", 4096)
+LLM_TEMPERATURE = _float("ATS_LLM_TEMPERATURE", 0.3)
+LLM_TEMPERATURE_P1 = _float("ATS_LLM_TEMPERATURE_P1", 0.2)
+LLM_TEMPERATURE_P2 = _float("ATS_LLM_TEMPERATURE_P2", 0.5)
 LLM_TWO_PASS = os.environ.get("ATS_LLM_TWO_PASS", "").lower() in ("1", "true", "yes")
 RERANK = os.environ.get("ATS_RERANK", "").lower() in ("1", "true", "yes")
 

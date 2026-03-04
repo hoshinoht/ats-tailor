@@ -26,6 +26,7 @@ from .scoring import (
     score_against_jd,
     score_against_jd_multi,
 )
+from . import config
 from .config import EMBED_MODEL, LLM_MODEL, MAX_PAGE_LINES, MIN_PROJECTS, RERANK
 from .selection import (
     estimate_line_count,
@@ -82,7 +83,13 @@ def main():
                         help=f"SentenceTransformer model name (env: ATS_EMBED_MODEL, default: {EMBED_MODEL})")
     parser.add_argument("--rerank", action="store_true", default=RERANK,
                         help="Re-score top candidates with a cross-encoder (env: ATS_RERANK)")
+    parser.add_argument("--llm-backend", choices=["auto", "mlx", "lmstudio", "ollama"],
+                        default=config.LLM_BACKEND,
+                        help="LLM backend (env: ATS_LLM_BACKEND, default: auto)")
     args = parser.parse_args()
+
+    # Wire CLI --llm-backend to config so llm.py picks it up
+    config.LLM_BACKEND = args.llm_backend
 
     if not args.company or not args.role:
         parser.error("--company and --role are required")
@@ -140,7 +147,8 @@ def main():
     # ── Optional LLM keyword expansion ──
     llm_terms = None
     if args.llm:
-        print(f"Expanding JD keywords via ollama ({args.llm})...")
+        backend_label = args.llm_backend if args.llm_backend != "auto" else "auto (MLX→LM Studio→Ollama)"
+        print(f"Expanding JD keywords via {backend_label} ({args.llm})...")
         expanded = expand_jd_with_llm(
             jd_text, args.llm,
             categories=[cat["name"] for cat in categories])

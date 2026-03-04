@@ -3,3 +3,4 @@ sentence-transformers
 numpy
 jinja2
 matplotlib
+mlx-lm
