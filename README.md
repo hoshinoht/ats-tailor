@@ -20,18 +20,18 @@ python -m ats_tailor.tailor \
   --output /tmp/ats-test
 ```
 
-| Arg         | Default                      | Description                                  |
-| ----------- | ---------------------------- | -------------------------------------------- |
-| `--jd`      | stdin                        | Job description text file                    |
-| `--company` | required                     | Company name                                 |
-| `--role`    | required                     | Role name                                    |
-| `--index`   | `index/`                     | YAML index directory                         |
-| `--profile` | `profile.yaml` next to index | Profile YAML (name, email, links)            |
-| `--output`  | `output/{company}-{role}`    | Output directory                             |
-| `--model`   | `all-MiniLM-L12-v2`          | SentenceTransformer model name               |
-| `--llm`     | off                          | Expand JD keywords via local LLM (see below) |
-| `--llm-backend` | `auto`                   | LLM backend: `auto`, `mlx`, `lmstudio`, `ollama` |
-| `--rerank`  | off                          | Re-score top candidates with a cross-encoder |
+| Arg             | Default                      | Description                                      |
+| --------------- | ---------------------------- | ------------------------------------------------ |
+| `--jd`          | stdin                        | Job description text file                        |
+| `--company`     | required                     | Company name                                     |
+| `--role`        | required                     | Role name                                        |
+| `--index`       | `index/`                     | YAML index directory                             |
+| `--profile`     | `profile.yaml` next to index | Profile YAML (name, email, links)                |
+| `--output`      | `output/{company}-{role}`    | Output directory                                 |
+| `--model`       | `all-MiniLM-L12-v2`          | SentenceTransformer model name                   |
+| `--llm`         | off                          | Expand JD keywords via local LLM (see below)     |
+| `--llm-backend` | `auto`                       | LLM backend: `auto`, `mlx`, `lmstudio`, `ollama` |
+| `--rerank`      | off                          | Re-score top candidates with a cross-encoder     |
 
 ## Configuration
 
@@ -41,27 +41,27 @@ All CLI flags can be set via a `.env` file in the ats-tailor repo root. Copy `.e
 cp .env.example .env
 ```
 
-| Variable                    | Default             | CLI override    |
-| --------------------------- | ------------------- | --------------- |
-| `ATS_EMBED_MODEL`           | `all-MiniLM-L12-v2` | `--model`       |
-| `ATS_LLM_MODEL`             | *(disabled)*        | `--llm`         |
-| `ATS_LLM_BACKEND`           | `auto`              | `--llm-backend` |
-| `ATS_LLM_NUM_CTX`           | `4096`              | —               |
-| `ATS_LLM_TEMPERATURE`       | `0.3`               | —               |
-| `ATS_LLM_TWO_PASS`          | `false`             | —               |
-| `ATS_LLM_TEMPERATURE_P1`    | `0.2`               | —               |
-| `ATS_LLM_TEMPERATURE_P2`    | `0.5`               | —               |
-| `ATS_LMSTUDIO_URL`          | `http://localhost:1234` | —           |
-| `ATS_MLX_MODEL`             | `mlx-community/Qwen3-8B-4bit` | —    |
-| `ATS_RERANK`                | `false`             | `--rerank`      |
-| `ATS_MAX_EXPERIENCE`        | `3`                 | —               |
-| `ATS_MAX_PROJECTS`          | `4`                 | —               |
-| `ATS_MIN_PROJECTS`          | `4`                 | —               |
-| `ATS_MAX_SKILL_LINES`       | `4`                 | —               |
-| `ATS_MAX_PROJECT_BULLETS`   | `3`                 | —               |
-| `ATS_MAX_EXP_BULLETS`       | `3`                 | —               |
-| `ATS_CHARS_PER_BULLET_LINE` | `80`                | —               |
-| `ATS_MAX_PAGE_LINES`        | `72`                | —               |
+| Variable                    | Default                       | CLI override    |
+| --------------------------- | ----------------------------- | --------------- |
+| `ATS_EMBED_MODEL`           | `all-MiniLM-L12-v2`           | `--model`       |
+| `ATS_LLM_MODEL`             | *(disabled)*                  | `--llm`         |
+| `ATS_LLM_BACKEND`           | `auto`                        | `--llm-backend` |
+| `ATS_LLM_NUM_CTX`           | `4096`                        | —               |
+| `ATS_LLM_TEMPERATURE`       | `0.3`                         | —               |
+| `ATS_LLM_TWO_PASS`          | `false`                       | —               |
+| `ATS_LLM_TEMPERATURE_P1`    | `0.2`                         | —               |
+| `ATS_LLM_TEMPERATURE_P2`    | `0.5`                         | —               |
+| `ATS_LMSTUDIO_URL`          | `http://localhost:1234`       | —               |
+| `ATS_MLX_MODEL`             | `mlx-community/Qwen3-8B-4bit` | —               |
+| `ATS_RERANK`                | `false`                       | `--rerank`      |
+| `ATS_MAX_EXPERIENCE`        | `3`                           | —               |
+| `ATS_MAX_PROJECTS`          | `4`                           | —               |
+| `ATS_MIN_PROJECTS`          | `4`                           | —               |
+| `ATS_MAX_SKILL_LINES`       | `4`                           | —               |
+| `ATS_MAX_PROJECT_BULLETS`   | `3`                           | —               |
+| `ATS_MAX_EXP_BULLETS`       | `3`                           | —               |
+| `ATS_CHARS_PER_BULLET_LINE` | `80`                          | —               |
+| `ATS_MAX_PAGE_LINES`        | `72`                          | —               |
 
 CLI flags override env vars; env vars override `.env` file values.
 
@@ -90,12 +90,12 @@ python -m ats_tailor.tailor ...
 
 Three backends are supported (`--llm-backend` / `ATS_LLM_BACKEND`):
 
-| Backend    | How it works | Setup |
-|------------|-------------|-------|
-| `mlx`      | In-process via [mlx-lm](https://github.com/ml-explore/mlx-lm) | `pip install mlx-lm` |
-| `lmstudio` | HTTP to [LM Studio](https://lmstudio.ai) OpenAI-compatible API | Start server: `lms server start` |
-| `ollama`   | HTTP to [Ollama](https://ollama.com) REST API | `ollama serve` + `ollama pull qwen3.5:9b` |
-| `auto`     | Try MLX → LM Studio → Ollama, skip on failure | Any of the above |
+| Backend    | How it works                                                   | Setup                                     |
+| ---------- | -------------------------------------------------------------- | ----------------------------------------- |
+| `mlx`      | In-process via [mlx-lm](https://github.com/ml-explore/mlx-lm)  | `pip install mlx-lm`                      |
+| `lmstudio` | HTTP to [LM Studio](https://lmstudio.ai) OpenAI-compatible API | Start server: `lms server start`          |
+| `ollama`   | HTTP to [Ollama](https://ollama.com) REST API                  | `ollama serve` + `ollama pull qwen3.5:9b` |
+| `auto`     | Try MLX → LM Studio → Ollama, skip on failure                  | Any of the above                          |
 
 **LM Studio notes:**
 - Default URL: `http://localhost:1234` (override with `ATS_LMSTUDIO_URL`)
@@ -141,4 +141,4 @@ See [docs/algorithm.pdf](docs/algorithm.pdf) for the full writeup.
 
 ## License
 
-GPLv3 (see [LICENSE](LICENSE))
+GNU GPLv3 (see [LICENSE](LICENSE))
