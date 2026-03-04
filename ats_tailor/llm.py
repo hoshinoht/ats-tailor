@@ -335,13 +335,17 @@ def _expand_two_pass(jd_text, model_name, categories):
         return _expand_single_pass(jd_text, model_name, categories)
 
     all_terms = []
+    seen = set()
     for domain, terms in obj.items():
         if isinstance(terms, list):
             domain_terms = [str(t) for t in terms if isinstance(t, str)]
             if domain_terms:
                 print(f"    {domain}: {', '.join(domain_terms)}",
                       file=sys.stderr)
-                all_terms.extend(domain_terms)
+                for t in domain_terms:
+                    if t.lower() not in seen:
+                        seen.add(t.lower())
+                        all_terms.append(t)
 
     if not all_terms:
         return _expand_single_pass(jd_text, model_name, categories)
