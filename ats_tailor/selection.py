@@ -5,10 +5,12 @@ import math
 import numpy as np
 
 from .config import (
+    CERT_THRESHOLD,
     CHARS_PER_BULLET_LINE,
     MAX_EXPERIENCE,
     MAX_PROJECTS,
     MAX_SKILL_LINES,
+    MIN_CERTIFICATIONS,
 )
 from .scoring import (
     build_skill_text,
@@ -88,10 +90,14 @@ def select_skills(categories, jd_embeddings, model, jd_lower, jd_text="", max_li
     return lines[:max_lines], all_skill_scores
 
 
-def select_certifications(certs, scores, threshold=0.25):
-    """Select certifications above the relevance threshold."""
+def select_certifications(certs, scores, threshold=CERT_THRESHOLD, min_n=MIN_CERTIFICATIONS):
+    """Select certifications above threshold, guaranteeing at least min_n."""
     ranked = sorted(zip(certs, scores), key=lambda x: x[1], reverse=True)
-    return [c for c, s in ranked if s > threshold]
+    above = [(c, s) for c, s in ranked if s > threshold]
+    # Guarantee minimum count from top-ranked even if below threshold
+    if len(above) < min_n:
+        above = ranked[:min_n]
+    return [c for c, _s in above]
 
 
 def estimate_line_count(experience, projects, summary=None):
@@ -99,8 +105,10 @@ def estimate_line_count(experience, projects, summary=None):
     lines = 0
     lines += 3  # header
     if summary:
-        lines += 2  # section header + summary text
-        lines += len(summary.get("highlights", []))  # one line per highlight
+        lines += 1  # section header
+        summary_text = summary.get("summary", "")
+        lines += math.ceil(len(summary_text) / CHARS_PER_BULLET_LINE) if summary_text else 0
+        lines += len(summary.get("highlights", []))
     lines += 4  # education (2 entries)
     lines += 2  # section headers for exp
     for role in experience:

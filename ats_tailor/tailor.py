@@ -27,7 +27,11 @@ from .scoring import (
     score_against_jd_multi,
 )
 from . import config
-from .config import EMBED_MODEL, LLM_MODEL, MAX_PAGE_LINES, MIN_PROJECTS, RERANK
+from .config import (
+    EMBED_MODEL, HF_TOKEN, LLM_MODEL, MAX_PAGE_LINES,
+    MIN_EXP_BULLETS, MIN_EXPERIENCE, MIN_PROJECT_BULLETS, MIN_PROJECTS,
+    RERANK, SECTION_PRIORITY,
+)
 from .selection import (
     estimate_line_count,
     select_certifications,
@@ -161,7 +165,7 @@ def main():
 
     # ── Load model & embed ──
     print(f"Loading embedding model ({args.model})...")
-    model = SentenceTransformer(args.model)
+    model = SentenceTransformer(args.model, token=HF_TOKEN)
 
     print("Embedding job description...")
     jd_chunks = chunk_text(jd_text)
@@ -256,7 +260,7 @@ def main():
     if args.rerank:
         print("Cross-encoder reranking top candidates...")
         from sentence_transformers import CrossEncoder
-        ce_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        ce_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", token=HF_TOKEN)
         top_n = min(10, len(projects))
         ranked_indices = sorted(
             range(len(projects)), key=lambda i: proj_scores[i], reverse=True
@@ -274,24 +278,47 @@ def main():
     exp_ctx = [build_role_context(r) for r in sel_roles]
     proj_ctx = [build_project_context(p) for p in sel_projects]
 
-    # ── Budget check (lax: trim bullets first, drop projects only as last resort) ──
+    # ── Budget enforcement (priority-aware: low-priority section trimmed/dropped first) ──
     line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
     max_lines = MAX_PAGE_LINES
 
-    # Pass 1: trim bullets to minimum (preserve min, skip if already at or below)
-    from .config import MIN_PROJECT_BULLETS as _MIN_PROJ_B
-    if line_est > max_lines:
-        for p in proj_ctx:
-            if len(p["bullets"]) > _MIN_PROJ_B:
-                p["bullets"] = p["bullets"][:_MIN_PROJ_B]
+    # Build ordered passes: trim bullets, then drop items.
+    # Low-priority section goes first so high-priority content is preserved.
+    if SECTION_PRIORITY == "experience":
+        bullet_passes = [
+            ("proj", proj_ctx, MIN_PROJECT_BULLETS),
+            ("exp",  exp_ctx,  MIN_EXP_BULLETS),
+        ]
+        drop_passes = [
+            ("proj", proj_ctx, sel_projects, sel_proj_scores, MIN_PROJECTS),
+            ("exp",  exp_ctx,  sel_roles,    sel_role_scores,  MIN_EXPERIENCE),
+        ]
+    else:
+        bullet_passes = [
+            ("exp",  exp_ctx,  MIN_EXP_BULLETS),
+            ("proj", proj_ctx, MIN_PROJECT_BULLETS),
+        ]
+        drop_passes = [
+            ("exp",  exp_ctx,  sel_roles,    sel_role_scores,  MIN_EXPERIENCE),
+            ("proj", proj_ctx, sel_projects, sel_proj_scores, MIN_PROJECTS),
+        ]
+
+    # Passes 1-2: trim bullets to minimum
+    for _label, ctx_list, min_bullets in bullet_passes:
+        if line_est <= max_lines:
+            break
+        for item in ctx_list:
+            if len(item["bullets"]) > min_bullets:
+                item["bullets"] = item["bullets"][:min_bullets]
         line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
 
-    # Pass 2: drop lowest-scoring projects if still over
-    while line_est > max_lines and len(proj_ctx) > MIN_PROJECTS:
-        proj_ctx.pop()
-        sel_projects.pop()
-        sel_proj_scores.pop()
-        line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
+    # Passes 3-4: drop lowest-scoring items (lists are still score-ranked)
+    for _label, ctx_list, sel_list, score_list, min_count in drop_passes:
+        while line_est > max_lines and len(ctx_list) > min_count:
+            ctx_list.pop()
+            sel_list.pop()
+            score_list.pop()
+            line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
 
     # ── Chronological reordering (most recent first) ──
     proj_order = sorted(range(len(proj_ctx)), key=lambda i: parse_start_date(proj_ctx[i]["period"]), reverse=True)
