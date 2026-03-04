@@ -29,6 +29,20 @@ def parse_end_date(period):
     return datetime(2020, 1, 1)
 
 
+def parse_start_date(period):
+    """Extract the start date from a period string."""
+    import re
+    matches = re.findall(r"([A-Za-z]{3})\s+(\d{4})", period)
+    if matches:
+        month_str, year_str = matches[0]
+        month = MONTH_MAP.get(month_str.lower()[:3], 6)
+        return datetime(int(year_str), month, 1)
+    years = re.findall(r"(\d{4})", period)
+    if years:
+        return datetime(int(years[0]), 6, 1)
+    return datetime(2020, 1, 1)
+
+
 def recency_multiplier(period):
     """Recency boost: current=1.10, <12mo=1.05, <24mo=1.02, older=1.00."""
     end_date = parse_end_date(period)

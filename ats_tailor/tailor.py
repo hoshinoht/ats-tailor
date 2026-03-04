@@ -51,6 +51,7 @@ from .loaders import (
     load_cached_embeddings,
     load_index,
     load_profile,
+    parse_start_date,
     recency_multiplier,
     save_cached_embeddings,
 )
@@ -277,11 +278,12 @@ def main():
     line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
     max_lines = MAX_PAGE_LINES
 
-    # Pass 1: trim to 2 bullets per project
+    # Pass 1: trim bullets to minimum (preserve min, skip if already at or below)
+    from .config import MIN_PROJECT_BULLETS as _MIN_PROJ_B
     if line_est > max_lines:
         for p in proj_ctx:
-            if len(p["bullets"]) > 2:
-                p["bullets"] = p["bullets"][:2]
+            if len(p["bullets"]) > _MIN_PROJ_B:
+                p["bullets"] = p["bullets"][:_MIN_PROJ_B]
         line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
 
     # Pass 2: drop lowest-scoring projects if still over
@@ -291,11 +293,42 @@ def main():
         sel_proj_scores.pop()
         line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
 
+    # ── Chronological reordering (most recent first) ──
+    proj_order = sorted(range(len(proj_ctx)), key=lambda i: parse_start_date(proj_ctx[i]["period"]), reverse=True)
+    proj_ctx = [proj_ctx[i] for i in proj_order]
+    sel_projects = [sel_projects[i] for i in proj_order]
+    sel_proj_scores = [sel_proj_scores[i] for i in proj_order]
+
+    exp_order = sorted(range(len(exp_ctx)), key=lambda i: parse_start_date(exp_ctx[i]["period"]), reverse=True)
+    exp_ctx = [exp_ctx[i] for i in exp_order]
+    sel_roles = [sel_roles[i] for i in exp_order]
+    sel_role_scores = [sel_role_scores[i] for i in exp_order]
+
     print(f"  Estimated lines: {line_est} (budget: {max_lines})")
     print(f"  Experience: {len(exp_ctx)} roles")
     print(f"  Projects: {len(proj_ctx)} projects")
     print(f"  Skill lines: {len(skill_lines)}")
     print(f"  Certifications: {len(sel_certs)}")
+
+    # ── Bullet wrap warnings ──
+    _LATEX_LINE_WIDTH = 114
+
+    def _warn_bullet_wraps(contexts, label):
+        for item in contexts:
+            name = item.get("company") or item.get("name", "?")
+            for bullet in item.get("bullets", []):
+                if len(bullet) <= _LATEX_LINE_WIDTH:
+                    continue
+                wrap_at = bullet.rfind(" ", 0, _LATEX_LINE_WIDTH)
+                if wrap_at == -1:
+                    wrap_at = _LATEX_LINE_WIDTH
+                second_line = bullet[wrap_at:].strip()
+                if len(second_line.split()) <= 2:
+                    print(f"  ! Wrap [{label}] {name}: {len(bullet)} chars, "
+                          f"only {len(second_line.split())} word(s) on line 2: '{second_line}'")
+
+    _warn_bullet_wraps(exp_ctx, "exp")
+    _warn_bullet_wraps(proj_ctx, "proj")
 
     # ── Render ──
     print("Rendering LaTeX...")

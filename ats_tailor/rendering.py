@@ -4,7 +4,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from .config import MAX_EXP_BULLETS, MAX_PROJECT_BULLETS
+from .config import MAX_EXP_BULLETS, MAX_PROJECT_BULLETS, MIN_EXP_BULLETS, MIN_PROJECT_BULLETS
 
 PKG_DIR = Path(__file__).resolve().parent
 
@@ -38,6 +38,11 @@ def build_project_context(proj):
     tech_line = ", ".join(tech_parts[:8])
 
     bullets = proj.get("responsibilities", [])[:MAX_PROJECT_BULLETS]
+    # Pad with impact bullets if below minimum
+    if len(bullets) < MIN_PROJECT_BULLETS:
+        impact = proj.get("impact", [])
+        needed = MIN_PROJECT_BULLETS - len(bullets)
+        bullets = bullets + impact[:needed]
 
     summary = proj.get("summary", proj["name"])
     seps = [" with ", " using ", " for ", " via ", " comparing ", " between "]
@@ -59,11 +64,19 @@ def build_project_context(proj):
 
 def build_role_context(role):
     """Build template context for a role."""
+    bullets = role.get("bullets", [])[:MAX_EXP_BULLETS]
+    # Pad with skills_used as fallback if below minimum
+    if len(bullets) < MIN_EXP_BULLETS:
+        fallback = [f"Applied {s} in a professional engineering environment"
+                    for s in role.get("skills_used", [])
+                    if not any(s.lower() in b.lower() for b in bullets)]
+        needed = MIN_EXP_BULLETS - len(bullets)
+        bullets = bullets + fallback[:needed]
     return {
         "company": role["company"],
         "title": role["title"],
         "period": role["period"],
-        "bullets": role.get("bullets", [])[:MAX_EXP_BULLETS],
+        "bullets": bullets,
     }
 
 
