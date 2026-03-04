@@ -30,6 +30,7 @@ python -m ats_tailor.tailor \
 | `--output`  | `output/{company}-{role}`    | Output directory                             |
 | `--model`   | `all-MiniLM-L12-v2`          | SentenceTransformer model name               |
 | `--llm`     | off                          | Expand JD keywords via local LLM (see below) |
+| `--llm-backend` | `auto`                   | LLM backend: `auto`, `mlx`, `lmstudio`, `ollama` |
 | `--rerank`  | off                          | Re-score top candidates with a cross-encoder |
 
 ## Configuration
@@ -40,21 +41,27 @@ All CLI flags can be set via a `.env` file in the ats-tailor repo root. Copy `.e
 cp .env.example .env
 ```
 
-| Variable                    | Default             | CLI override |
-| --------------------------- | ------------------- | ------------ |
-| `ATS_EMBED_MODEL`           | `all-MiniLM-L12-v2` | `--model`    |
-| `ATS_LLM_MODEL`             | *(disabled)*        | `--llm`      |
-| `ATS_LLM_NUM_CTX`           | `4096`              | —            |
-| `ATS_LLM_TWO_PASS`          | `false`             | —            |
-| `ATS_RERANK`                | `false`             | `--rerank`   |
-| `ATS_MAX_EXPERIENCE`        | `3`                 | —            |
-| `ATS_MAX_PROJECTS`          | `4`                 | —            |
-| `ATS_MIN_PROJECTS`          | `4`                 | —            |
-| `ATS_MAX_SKILL_LINES`       | `4`                 | —            |
-| `ATS_MAX_PROJECT_BULLETS`   | `3`                 | —            |
-| `ATS_MAX_EXP_BULLETS`       | `3`                 | —            |
-| `ATS_CHARS_PER_BULLET_LINE` | `80`                | —            |
-| `ATS_MAX_PAGE_LINES`        | `72`                | —            |
+| Variable                    | Default             | CLI override    |
+| --------------------------- | ------------------- | --------------- |
+| `ATS_EMBED_MODEL`           | `all-MiniLM-L12-v2` | `--model`       |
+| `ATS_LLM_MODEL`             | *(disabled)*        | `--llm`         |
+| `ATS_LLM_BACKEND`           | `auto`              | `--llm-backend` |
+| `ATS_LLM_NUM_CTX`           | `4096`              | —               |
+| `ATS_LLM_TEMPERATURE`       | `0.3`               | —               |
+| `ATS_LLM_TWO_PASS`          | `false`             | —               |
+| `ATS_LLM_TEMPERATURE_P1`    | `0.2`               | —               |
+| `ATS_LLM_TEMPERATURE_P2`    | `0.5`               | —               |
+| `ATS_LMSTUDIO_URL`          | `http://localhost:1234` | —           |
+| `ATS_MLX_MODEL`             | `mlx-community/Qwen3-8B-4bit` | —    |
+| `ATS_RERANK`                | `false`             | `--rerank`      |
+| `ATS_MAX_EXPERIENCE`        | `3`                 | —               |
+| `ATS_MAX_PROJECTS`          | `4`                 | —               |
+| `ATS_MIN_PROJECTS`          | `4`                 | —               |
+| `ATS_MAX_SKILL_LINES`       | `4`                 | —               |
+| `ATS_MAX_PROJECT_BULLETS`   | `3`                 | —               |
+| `ATS_MAX_EXP_BULLETS`       | `3`                 | —               |
+| `ATS_CHARS_PER_BULLET_LINE` | `80`                | —               |
+| `ATS_MAX_PAGE_LINES`        | `72`                | —               |
 
 CLI flags override env vars; env vars override `.env` file values.
 
@@ -73,19 +80,29 @@ python -m ats_tailor.tailor --llm qwen2.5-coder:1.5b ...
 python -m ats_tailor.tailor ...
 ```
 
-**Default model:** `qwen3.5:9b` (~6.6 GB). Thinking is disabled; output capped at 512 tokens. Context window defaults to 4096 (`ATS_LLM_NUM_CTX`).
+**Default model:** `qwen3.5:9b` (~6.6 GB). Context window defaults to 4096 (`ATS_LLM_NUM_CTX`).
 
-**Category-aware prompting.** The candidate's skill category names are injected into the prompt so the LLM prioritizes terms the candidate can actually match, while still including important terms outside those areas.
+**Category-aware prompting.** The candidate's skill category names are injected into the prompt so the LLM prioritises terms the candidate can actually match, while still including important terms outside those areas.
 
-**Two-pass mode** (`ATS_LLM_TWO_PASS=true`). Uses two LLM calls: pass 1 infers the 3-5 most relevant domains from the candidate's skill categories, pass 2 expands keywords scoped to those domains. ~2x latency but more targeted results on generic JDs. Falls back to single-pass automatically on failure.
+**Two-pass mode** (`ATS_LLM_TWO_PASS=true`). Uses two LLM calls: pass 1 infers the 3-5 most relevant domains from the candidate's skill categories, pass 2 expands keywords scoped to those domains. ~2x latency but more targeted results on generic JDs. Falls back to single-pass automatically on failure. Each pass has its own temperature setting (`ATS_LLM_TEMPERATURE_P1` for domain classification, `ATS_LLM_TEMPERATURE_P2` for keyword expansion).
 
-**Requirements:** [ollama](https://ollama.com) must be installed and running (`ollama serve`). Pull the model before first use:
+### Backends
 
-```bash
-ollama pull qwen3.5:9b
-```
+Three backends are supported (`--llm-backend` / `ATS_LLM_BACKEND`):
 
-If ollama is unreachable the pipeline prints a warning and continues without expansion. Token usage is logged to stderr after each LLM call.
+| Backend    | How it works | Setup |
+|------------|-------------|-------|
+| `mlx`      | In-process via [mlx-lm](https://github.com/ml-explore/mlx-lm) | `pip install mlx-lm` |
+| `lmstudio` | HTTP to [LM Studio](https://lmstudio.ai) OpenAI-compatible API | Start server: `lms server start` |
+| `ollama`   | HTTP to [Ollama](https://ollama.com) REST API | `ollama serve` + `ollama pull qwen3.5:9b` |
+| `auto`     | Try MLX → LM Studio → Ollama, skip on failure | Any of the above |
+
+**LM Studio notes:**
+- Default URL: `http://localhost:1234` (override with `ATS_LMSTUDIO_URL`)
+- Uses whatever model is loaded in the app; the `--llm` model name is sent as a hint
+- For thinking models (e.g. Qwen3.5), disable reasoning in LM Studio's server settings for faster, cleaner output
+
+If the backend is unreachable the pipeline prints a warning and continues without expansion. Token usage is logged to stderr after each LLM call.
 
 Expanded terms appear in the console output and in the `match_report.md` under **LLM-Expanded Keywords**.
 
