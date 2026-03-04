@@ -45,7 +45,7 @@ LMSTUDIO_URL = _str("ATS_LMSTUDIO_URL", "http://localhost:1234")
 LLM_NUM_CTX = _int("ATS_LLM_NUM_CTX", 4096)
 LLM_TEMPERATURE = _float("ATS_LLM_TEMPERATURE", 0.3)
 LLM_TEMPERATURE_P1 = _float("ATS_LLM_TEMPERATURE_P1", 0.2)
-LLM_TEMPERATURE_P2 = _float("ATS_LLM_TEMPERATURE_P2", 0.5)
+LLM_TEMPERATURE_P2 = _float("ATS_LLM_TEMPERATURE_P2", 0.6)
 LLM_TWO_PASS = os.environ.get("ATS_LLM_TWO_PASS", "").lower() in ("1", "true", "yes")
 RERANK = os.environ.get("ATS_RERANK", "").lower() in ("1", "true", "yes")
 
