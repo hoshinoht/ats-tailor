@@ -264,9 +264,11 @@ label whose JD file is not on this machine is skipped with a note and listed
 under the table — labels are tracked, postings are local, so a missing one is
 normal rather than a failed sweep.
 Results are written to `eval/<config-hash>.json`, where the hash covers every
-`ATS_*` setting, the embedding model, the index content, the engine's own
-sources and its git HEAD — so two runs are only comparable when the hash says
-they are, and editing the scorer changes the hash even before it is committed:
+`ATS_*` setting, the embedding model, the index content and the engine's own
+sources — so two runs are only comparable when the hash says they are, and
+editing the scorer changes the hash even before it is committed. The git HEAD
+is recorded alongside for provenance but not hashed, so committing unchanged
+code does not rename a baseline:
 
 ```bash
 ats-tailor eval --compare eval/8672be16bb0d.json eval/<new>.json

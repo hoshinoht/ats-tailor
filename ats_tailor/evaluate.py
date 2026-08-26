@@ -124,16 +124,22 @@ def code_hash() -> str:
 
 
 def config_fingerprint(index_dir: str | Path) -> tuple[str, dict[str, Any]]:
-    """``(hash, the values it was computed from)``."""
+    """``(hash, the values it was computed from)``.
+
+    ``git_head`` is recorded but deliberately *not* hashed: committing the
+    engine unchanged would otherwise rename every baseline and make the tracked
+    numbers un-comparable to the code that produced them. ``code_hash`` already
+    identifies the sources exactly, so the commit is provenance, not identity.
+    """
     values = {
         "ats_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("ATS_")},
         "embed_model": config.EMBED_MODEL,
         "index_hash": index_hash(index_dir),
         "code_hash": code_hash(),
-        "git_head": git_head(Path(__file__).resolve().parent.parent),
     }
     payload = json.dumps(values, sort_keys=True).encode()
-    return hashlib.sha256(payload).hexdigest(), values
+    digest = hashlib.sha256(payload).hexdigest()
+    return digest, {**values, "git_head": git_head(Path(__file__).resolve().parent.parent)}
 
 
 # ── One run ───────────────────────────────────────────────────────────────────
