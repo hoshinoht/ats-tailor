@@ -32,6 +32,10 @@ ats-tailor <command> [options]
 | `check <output_dir> …` | Compile the rendered resume and check that an ATS can read it: parse checks plus keyword coverage. Exit 1 if any parse check fails. |
 | `labels init <jd> --company --role` | Scaffold the per-JD ground truth file `eval` scores against. `labels list` prints what is on disk. |
 | `eval …` | Run the pipeline over every label file, score it, print the table, write `<config-hash>.json`. `--compare a.json b.json` diffs two results. |
+| `labels from-run <dir\|id>` | Merge a run's pins and exclusions into its label file. |
+| `sync [--index DIR] [--embed]` | Bring the runtime store in line with the index; `--embed` pre-computes the embeddings a run would otherwise wait for. |
+| `override <out_dir> …` | Edit the per-run `overrides.yaml` next to a run's output; `--show` prints it. |
+| `runs list\|show\|status\|note\|quiet` | The application tracker. |
 
 `python -m ats_tailor.tailor …` remains supported and is unchanged.
 
@@ -110,6 +114,7 @@ cp .env.example .env
 | `ATS_SKILL_MIN_GAIN`        | `0.03`                        | — (v2)          |
 | `ATS_PIN_SKILL_GROUPS`      | `Programming Languages`       | — (v2)          |
 | `ATS_HEADER_CLAIMS`         | `false`                       | — (v2)          |
+| `ATS_DATA_DIR`              | `<index>/../data/`            | `--data-dir`    |
 
 CLI flags override env vars; env vars override `.env` file values.
 
@@ -174,6 +179,108 @@ If `ATS_LLM_EXPAND=true` is set in the environment, pass `--no-llm` to force a n
 | `match_viz.png`   | Visual score breakdown                          |
 | `selection.json`  | What the run selected, in score order (input to `check` and `eval`). Under `--engine v2` it also carries the parsed requirements, per-requirement coverage, and the full selection trace |
 | `ats_check.md/.json` | Parse + keyword report, written by `check` or `tailor --check` |
+| `overrides.yaml`  | Per-run pins, exclusions and phrasing — hand-written or written by `override`, read by the next `--engine v2` run of the same directory |
+
+## Runtime store
+
+`data/ats.db` (SQLite, gitignored) holds everything derived from the index or
+produced by a run: entity snapshots, the v2 embedding cache, the postings that
+were tailored to, and the run records the tracker reads. The index YAML and the
+labels stay the source of truth — delete the database and `ats-tailor sync`
+rebuilds all of it except the run history, which was never in the index.
+
+```bash
+ats-tailor sync --index index            # entities only, idempotent
+ats-tailor sync --index index --embed    # + claim, skill and cert embeddings
+```
+
+The path is `ATS_DATA_DIR` if set, else `<index>/../data/`, else `./data/`.
+`sync` prints `added / updated / unchanged / pruned / embedded`; a second run
+over an unchanged index reports everything unchanged and writes nothing.
+
+The v2 engine reads and writes its embeddings here, keyed on the hash of each
+individual text, so editing one bullet re-encodes that bullet and nothing else.
+The v1 engine still uses its `.emb_cache/*.npy` files and is unaffected.
+
+## Overrides
+
+The solver decides what covers the posting best; you know things it cannot.
+An `overrides.yaml` in a run's output directory says so, and the next
+`--engine v2` run of that directory honours it — hard, before anything is
+scored:
+
+```yaml
+pin_items: [carehaven]      # role/project ids that must be shown
+exclude_items: [wishbone]   # ids that must never be shown
+pin_bullets: [carehaven.i1] # bullet ids (their item is pinned too)
+exclude_bullets: [razer-swe.b3]
+bullet_text:                # per-run phrasing; the source facts must survive
+  carehaven.r1: "Fronted 10+ services with a gRPC gateway enforcing auth and rate limits"
+skills_pin: [kubernetes]    # skill ids for the Skills section
+skills_exclude: [dart]
+summary: null               # replacement summary text ("" drops the section)
+requirements:               # edits to the extracted requirement list
+  remove: [req-3]
+  reweight: {req-7: 1.5}
+  add:
+    - {text: "Terraform / IaC", kind: must, terms: [Terraform, IaC]}
+budget_lines: null          # claim-line budget, replacing the computed one
+```
+
+`bullet_text` is substituted before the score matrix is built, so an edited
+bullet is what gets embedded, costed and rendered — a rephrase changes the
+decision, not just the page. When an edit drops a number the source bullet's
+`metrics` claimed, the run prints a warning naming the bullet and the missing
+figure. It never blocks: it is your resume, and dropping a figure is sometimes
+right. Quietly turning a measured achievement into a claim about nothing is
+not.
+
+Write the file by hand, or:
+
+```bash
+ats-tailor override output/cpf-sre-intern --pin carehaven --exclude wishbone
+ats-tailor override output/cpf-sre-intern --text 'p1.i1=Cut deploy time by 40%'
+ats-tailor override output/cpf-sre-intern --show
+```
+
+The editor round-trips through ruamel, so comments and hand-written order
+survive. Ids naming nothing in the index are reported and ignored rather than
+failing the run. Then re-run `tailor --engine v2 --output <same dir>`; the new
+run record carries the overrides that were applied.
+
+## Tracker
+
+Every `tailor --engine v2` records a run — id `<company>-<role>-<timestamp>`,
+status `drafted`, the selection, the coverage the check measured, the hash of
+the PDF that was compiled, and the overrides applied. (`eval` passes
+`--no-record`: a sweep is measurement, not an application.)
+
+```bash
+ats-tailor runs list [--status applied] [--company cpf]
+ats-tailor runs show <id>
+ats-tailor runs status <id> applied --note "submitted via the portal"
+ats-tailor runs note <id> "recruiter replied"
+ats-tailor runs quiet [--days 10]
+```
+
+One vocabulary, underscores, no synonyms:
+`drafted → applied → interview → offer → hired | rejected | no_response |
+offer_declined | withdrawn`; the last five are final. Moving off `drafted`
+stamps `applied_at`, which is the date follow-ups are counted from, and every
+status change is kept as a dated note. Outcomes are recorded, never inferred —
+`runs quiet` lists open applications nobody has said anything about in N days
+and stops there.
+
+Decisions made in an override are the same judgement a label records, so they
+can be promoted:
+
+```bash
+ats-tailor labels from-run output/cpf-sre-intern --labels-dir labels
+```
+
+`pin_items` merge into `pin_projects`/`pin_roles` by item kind and
+`exclude_items` into `exclude`, additively, keeping the label file's existing
+entries and comments.
 
 ## ATS requirements
 

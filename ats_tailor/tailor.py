@@ -133,6 +133,10 @@ def run(argv=None):
     parser.add_argument("--engine", choices=["v1", "v2"], default=config.ENGINE,
                         help=f"selection engine (env: ATS_ENGINE, default: {config.ENGINE}); "
                              "v1 ranks whole items, v2 covers parsed requirements")
+    parser.add_argument("--overrides", type=str, default=None,
+                        help="overrides file (v2; default: overrides.yaml in the output dir)")
+    parser.add_argument("--no-record", action="store_true",
+                        help="do not write a run record into the runtime store (v2)")
     args = parser.parse_args(raw_args)
 
     # Wire CLI --llm-backend to config so llm.py picks it up
@@ -188,10 +192,7 @@ def run(argv=None):
             # invented keywords in front of that would tier and weight text the
             # posting never contained. LLM extraction arrives in Phase 3c.
             print("  Note: --llm is ignored by the v2 engine (see docs/plans/phase-3a.md)")
-        result = _run_v2(args, jd_text, profile, index_dir, out_dir)
-        if args.check:
-            _run_ats_check(result, profile, index_dir, jd_text, out_dir, args.company)
-        return result
+        return _v2_run_and_record(args, jd_text, profile, index_dir, out_dir)
 
     # ── Load index ──
     print(f"Loading YAML index from {index_dir}...")
@@ -579,7 +580,7 @@ def run(argv=None):
     return result
 
 
-def _run_v2(args, jd_text, profile, index_dir, out_dir):
+def _run_v2(args, jd_text, profile, index_dir, out_dir, overrides=None, store=None):
     """The v2 engine, which needs the typed index rather than the v1 dicts."""
     from .index_io import detect_layout, load_index_v2
     from .pipeline import V2Options, tailor_v2
@@ -592,8 +593,71 @@ def _run_v2(args, jd_text, profile, index_dir, out_dir):
     index = load_index_v2(index_dir)
     return tailor_v2(
         jd_text, index, profile, args.company, args.role, out_dir,
-        V2Options(model=args.model, index_dir=index_dir, rerank=args.rerank),
+        V2Options(
+            model=args.model, index_dir=index_dir, rerank=args.rerank,
+            overrides=overrides, store=store, jd_path=args.jd,
+        ),
     )
+
+
+def _v2_run_and_record(args, jd_text, profile, index_dir, out_dir):
+    """A v2 run plus the paper trail: overrides in, run record out.
+
+    The record is written for a real ``tailor`` invocation only. ``eval`` drives
+    the same function a dozen times per sweep and none of those is an
+    application, so it passes ``--no-record``.
+    """
+    from . import overrides as overrides_mod
+    from .atscheck import output_filename
+    from .jd.hashing import jd_hash
+    from .store import Store
+    from .tracker import record
+
+    try:
+        applied, overrides_file = overrides_mod.find(out_dir, args.overrides)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if overrides_file is not None:
+        print(f"Applying overrides from {overrides_file}")
+
+    store = Store.open(index_dir)
+    try:
+        result = _run_v2(args, jd_text, profile, index_dir, out_dir, applied, store)
+        check_payload = None
+        pdf_path = out_dir / output_filename(profile.get("name", ""), args.company)
+        if args.check:
+            parse_report, coverage, compiled = _run_ats_check(
+                result, profile, index_dir, jd_text, out_dir, args.company)
+            check_payload = {
+                "parse": parse_report.to_dict(),
+                "coverage": coverage.to_dict() if coverage is not None else None,
+            }
+            pdf_path = compiled.pdf_path
+        if not args.no_record:
+            run = record(
+                store, result,
+                jd_hash=jd_hash(jd_text),
+                jd_path=args.jd,
+                config_hash=_config_hash(index_dir),
+                overrides=applied.model_dump(mode="json") if not applied.empty() else None,
+                check=check_payload,
+                pdf_path=pdf_path,
+            )
+            print(f"  recorded run {run.id} (status {run.status})")
+    finally:
+        store.close()
+    return result
+
+
+def _config_hash(index_dir):
+    """The eval harness's fingerprint, so a run can be tied to how it was scored."""
+    from .evaluate import config_fingerprint
+
+    try:
+        return config_fingerprint(index_dir, "v2")[0]
+    except (OSError, ValueError):
+        return None
 
 
 def _run_ats_check(result, profile, index_dir, jd_text, out_dir, company):
@@ -623,7 +687,7 @@ def _run_ats_check(result, profile, index_dir, jd_text, out_dir, company):
     write_reports(out_dir, parse_report, coverage)
     print(summarize(parse_report, coverage))
     print(f"  reports: {out_dir / 'ats_check.md'}, {out_dir / 'ats_check.json'}")
-    return parse_report, coverage
+    return parse_report, coverage, compiled
 
 
 def load_index_for_terms(index_dir):

@@ -34,15 +34,24 @@ from .adapt import (
     skill_claims,
 )
 from .atscheck import CompileError, compile_pdf, gap_terms, index_term_forms, output_filename
-from .embedding import SentenceTransformerEmbedder, encode_cached
+from .embedding import SentenceTransformerEmbedder, encode_store
 from .index_io import to_legacy
+from .jd.hashing import jd_hash
 from .jd.requirements import requirements_from_jd
 from .models import Index
+from .overrides import (
+    Overrides,
+    apply_requirements,
+    metric_warnings,
+    resolve as resolve_overrides,
+    text_map,
+)
 from .rendering import render_prompt, render_resume
 from .reporting import generate_requirement_visualization, generate_v2_report
 from .results import RunResult
 from .scoring import build_cert_text, chunk_text, compute_keyword_bonus
 from .selection import estimate_line_count, select_certifications
+from .store import Store
 
 #: How much of the page a run gives back when the PDF spills onto page two.
 BUDGET_STEP = 4
@@ -77,6 +86,13 @@ class V2Options:
     params: Params = field(default_factory=lambda: default_params())
     write_prompt: bool = True
     quiet: bool = False
+    #: Per-application pins, exclusions, phrasing and requirement edits.
+    overrides: Overrides = field(default_factory=Overrides)
+    #: The runtime store backing the embedding cache and the JD profile. Left
+    #: unset, the run opens (and closes) the one belonging to ``index_dir``.
+    store: Store | None = None
+    #: Where the posting came from, recorded with the JD profile.
+    jd_path: str | None = None
 
 
 def tailor_v2(
@@ -92,14 +108,44 @@ def tailor_v2(
     options = options or V2Options()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cache_dir = Path(options.index_dir or out_dir) / ".emb_cache"
     say = (lambda *_a, **_k: None) if options.quiet else print
+    overrides = options.overrides or Overrides()
+    store = options.store or Store.open(options.index_dir)
+    owns_store = options.store is None
 
+    try:
+        return _tailor_v2(jd_text, index, profile, company, role, out_dir,
+                          options, overrides, store, say)
+    finally:
+        if owns_store:
+            store.close()
+
+
+def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
+               overrides, store, say) -> RunResult:
     # ── 1. posting → requirements, index → claims ──
     term_forms = index_term_forms(index)
     gaps = gap_terms(jd_text, index, extra_known=[company, role])
-    requirements = requirements_from_jd(jd_text, term_forms, gaps)
-    claims = claims_from_index(index)
+    extracted = requirements_from_jd(jd_text, term_forms, gaps)
+    requirements = apply_requirements(extracted, overrides.requirements)
+    if not overrides.requirements.empty():
+        say(f"  Overrides: requirements {len(extracted)} → {len(requirements)} "
+            f"({len(overrides.requirements.reweight)} reweighted)")
+    # ``extracted`` is what the parser said; ``edited`` is what this run used,
+    # recorded separately so 3c's LLM extractor can be judged against the
+    # deterministic one without a human edit being mistaken for either.
+    store.put_jd_profile(
+        jd_hash(jd_text), jd_text, provider="fallback",
+        source_path=options.jd_path,
+        extracted=[_requirement_dict(r) for r in extracted],
+        edited=([_requirement_dict(r) for r in requirements]
+                if not overrides.requirements.empty() else None),
+    )
+
+    text_edits = text_map(overrides)
+    for warning in metric_warnings(index, text_edits):
+        say(f"  Warning: {warning}")
+    claims = claims_from_index(index, text_overrides=text_edits)
     if config.HEADER_CLAIMS:
         claims += header_claims(index)
     claims += skill_claims(index, requirements)
@@ -109,13 +155,21 @@ def tailor_v2(
     if gaps:
         say(f"  Warning: {len(gaps)} JD term(s) not in index: {', '.join(gaps)}")
 
+    resolved = resolve_overrides(overrides, index)
+    for warning in resolved.warnings():
+        say(f"  Warning: {warning}")
+    if not overrides.empty():
+        say(f"  Overrides: {overrides.summary_line()}")
+
     # ── 2. the score matrix ──
     embedder = SentenceTransformerEmbedder(options.model)
-    claim_vectors = encode_cached(
-        embedder, [c.text for c in claims], cache_dir, "claim", embedder.passage_prefix
+    claim_vectors = encode_store(
+        embedder, [c.text for c in claims], store,
+        ["skill" if c.section == "skill" else "claim" for c in claims],
+        embedder.passage_prefix,
     )
-    requirement_vectors = encode_cached(
-        embedder, [r.text for r in requirements], cache_dir, "req", embedder.query_prefix
+    requirement_vectors = encode_store(
+        embedder, [r.text for r in requirements], store, "req", embedder.query_prefix
     )
     reranker = _load_reranker() if options.rerank else None
     matrix, claim_sim = build_matrix(
@@ -127,14 +181,19 @@ def tailor_v2(
     _skills, _projects, legacy_exp, legacy_certs, summary_data = to_legacy(index)
     education = legacy_exp["education"][:2]
     certs = legacy_certs["certifications"]
-    selected_certs = select_certifications(certs, _cert_scores(embedder, jd_text, certs, cache_dir))
+    selected_certs = select_certifications(certs, _cert_scores(embedder, jd_text, certs, store))
+    summary_data = _apply_summary(summary_data, overrides.summary)
 
     fixed_lines = estimate_line_count([], [], summary_data, selected_certs)
     # The fixed estimate already reserves a flat block for the skills section;
     # the solver pays for each skills line through its group cost, so give that
     # part of the block back rather than charging for it twice.
     budget = options.max_page_lines - (fixed_lines - config.MAX_SKILL_LINES)
-    say(f"  Fixed lines: {fixed_lines}; claim budget: {budget}")
+    if overrides.budget_lines is not None:
+        budget = int(overrides.budget_lines)
+        say(f"  Fixed lines: {fixed_lines}; claim budget: {budget} (overridden)")
+    else:
+        say(f"  Fixed lines: {fixed_lines}; claim budget: {budget}")
 
     # ── 4-5. select, render, and shrink until it fits on one page ──
     rules = section_rules()
@@ -144,10 +203,18 @@ def tailor_v2(
     for iteration in range(max(1, options.max_iterations)):
         selection = select(
             matrix, requirements, claims,
-            Constraints(budget=budget, sections=rules, pin_groups=set(pinned)),
+            Constraints(
+                budget=budget,
+                sections=rules,
+                pin_groups=set(pinned) | resolved.pin_groups,
+                pin_claims=set(resolved.pin_claims),
+                exclude_groups=set(resolved.exclude_groups),
+                exclude_claims=set(resolved.exclude_claims),
+            ),
             options.params, claim_sim=claim_sim,
         )
-        exp_ctx, proj_ctx, skill_lines = render_context(selection, index, claims)
+        exp_ctx, proj_ctx, skill_lines = render_context(
+            selection, index, claims, text_overrides=text_edits)
         resume_tex = render_resume(
             company=company, role=role, profile=profile, education=education,
             experience=exp_ctx, projects=proj_ctx, skill_lines=skill_lines,
@@ -220,11 +287,7 @@ def tailor_v2(
         ),
         engine="v2",
         selection=selection.to_dict(),
-        requirements=[
-            {"id": r.id, "kind": r.kind, "weight": r.weight,
-             "terms": list(r.terms), "text": r.text}
-            for r in requirements
-        ],
+        requirements=[_requirement_dict(r) for r in requirements],
         coverage={k: round(float(v), 6) for k, v in selection.coverage.items()},
         pages=chosen["pages"],
         budget=chosen["budget"],
@@ -258,14 +321,31 @@ def _load_reranker():
     return _CrossEncoderReranker()
 
 
-def _cert_scores(embedder, jd_text: str, certs: Sequence[dict], cache_dir: Path) -> list[float]:
+def _requirement_dict(requirement) -> dict[str, Any]:
+    return {
+        "id": requirement.id, "kind": requirement.kind,
+        "weight": requirement.weight, "terms": list(requirement.terms),
+        "text": requirement.text,
+    }
+
+
+def _apply_summary(summary_data: dict | None, replacement: str | None) -> dict | None:
+    """The overridden summary text, or no Summary section when it is emptied."""
+    if replacement is None:
+        return summary_data
+    if not replacement.strip():
+        return None
+    return {**(summary_data or {"highlights": []}), "summary": replacement.strip()}
+
+
+def _cert_scores(embedder, jd_text: str, certs: Sequence[dict], store: Store) -> list[float]:
     """v1's certification scoring, unchanged: best JD-chunk cosine plus keywords."""
     if not certs:
         return []
     chunks = chunk_text(jd_text)
     jd_vectors = embedder.encode(chunks)
-    cert_vectors = encode_cached(
-        embedder, [build_cert_text(c) for c in certs], cache_dir, "certv2"
+    cert_vectors = encode_store(
+        embedder, [build_cert_text(c) for c in certs], store, "cert"
     )
     similarity = cert_vectors @ jd_vectors.T
     jd_lower = jd_text.lower()

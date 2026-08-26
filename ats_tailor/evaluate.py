@@ -177,6 +177,9 @@ def evaluate_one(
         "--output", str(run_dir),
         "--rerank" if rerank else "--no-rerank",
         "--engine", engine,
+        # A sweep is measurement, not application: it must not fill the
+        # tracker with a dozen runs nobody sent anywhere.
+        "--no-record",
     ]
     argv.append("--llm" if llm else "--no-llm")
 

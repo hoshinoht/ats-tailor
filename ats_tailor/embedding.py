@@ -75,6 +75,65 @@ class SentenceTransformerEmbedder:
         return vectors / np.maximum(norms, 1e-12)
 
 
+def text_hash(text: str, prefix: str = "") -> str:
+    """The embedding cache key for one string: sha256 of the *prefixed* text.
+
+    The prefix is part of the key because it is part of what the model was
+    asked to encode: switching a model's query/passage prefixes has to
+    invalidate the entry rather than silently return vectors for the other
+    prompt.
+    """
+    return _text_hash(f"{prefix}{text}")
+
+
+def encode_store(
+    embedder: SentenceTransformerEmbedder,
+    texts: Sequence[str],
+    store,
+    kind: str | Sequence[str],
+    prefix: str = "",
+) -> np.ndarray:
+    """Encode ``texts``, reading and writing the runtime store one text at a time.
+
+    ``kind`` is one label for every text, or one label per text when a batch
+    mixes them (the pipeline embeds bullets and skills in a single call).
+
+    The v2 replacement for :func:`encode_cached`. Where the ``.npy`` cache keys
+    on a hash of the *whole list*, so editing one bullet re-encoded every
+    claim, the store keys on each text: a run after an edit pays for the edit
+    only, and ``sync --embed`` can fill the cache ahead of any run.
+
+    v1 is untouched: it caches through :func:`loaders.load_cached_embeddings`
+    and keeps writing ``.emb_cache/*.npy``.
+    """
+    texts = list(texts)
+    if not texts:
+        return np.zeros((0, embedder.dimension), dtype=float)
+    kinds = [kind] * len(texts) if isinstance(kind, str) else list(kind)
+    if len(kinds) != len(texts):
+        raise ValueError("kind must be a string or one label per text")
+    hashes = [text_hash(text, prefix) for text in texts]
+    cached = store.get_embeddings(hashes, embedder.model_name)
+
+    missing = list(dict.fromkeys(h for h in hashes if h not in cached))
+    if missing:
+        by_hash = {h: t for h, t in zip(hashes, texts)}
+        kind_of = {h: k for h, k in zip(hashes, kinds)}
+        payload = [f"{prefix}{by_hash[h]}" for h in missing]
+        vectors = embedder.encode(payload)
+        store.put_embeddings(
+            (h, embedder.model_name, kind_of[h], vectors[i])
+            for i, h in enumerate(missing)
+        )
+        # Read back rather than reuse what was just encoded: the store keeps
+        # float32, so a freshly computed float64 row would make a cold run
+        # differ from a warm one in the last bits — and the whole point of the
+        # cache is that it changes nothing but the time taken.
+        cached.update(store.get_embeddings(missing, embedder.model_name))
+
+    return np.vstack([np.asarray(cached[h], dtype=float) for h in hashes])
+
+
 def encode_cached(
     embedder: SentenceTransformerEmbedder,
     texts: Sequence[str],
@@ -88,6 +147,11 @@ def encode_cached(
     The key hashes the prefixed texts, so switching a model's prefixes or
     editing a single bullet invalidates the entry rather than silently
     returning vectors for the previous wording.
+
+    The ``.npy``-backed encoder, kept for callers that have a directory rather
+    than a store. The v2 pipeline moved to :func:`encode_store` in Phase 3b;
+    v1's own caching predates this function and goes through
+    :mod:`ats_tailor.loaders` directly.
     """
     cache_dir = Path(cache_dir)
     payload = [f"{prefix}{text}" for text in texts]

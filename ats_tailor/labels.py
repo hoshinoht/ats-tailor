@@ -9,6 +9,12 @@ scoring change be called an improvement rather than a difference.
 ``labels init`` pre-fills the term lists from :func:`atscheck.auto_terms` and
 leaves everything else empty: the scaffold is a starting point to edit, never
 an answer key generated from the thing being measured.
+
+``labels from-run`` is the other way in: pins and exclusions a real application
+was overridden with are exactly the judgement a label records, so promoting
+them saves stating the same preference twice. The merge is additive and
+round-trips through ruamel — an existing label's entries, order and comments
+survive, because they were written by hand and this is a machine.
 """
 
 from __future__ import annotations
@@ -36,6 +42,62 @@ class Label(BaseModel):
     nice_terms: list[str] = Field(default_factory=list)
     #: optional full preference order, keyed by ``projects`` / ``roles``
     ranking: dict[str, list[str]] = Field(default_factory=dict)
+
+
+def merge_overrides(
+    labels_dir: str | Path,
+    slug_name: str,
+    pin_items: Iterable[str] = (),
+    exclude_items: Iterable[str] = (),
+    item_kinds: dict[str, str] | None = None,
+) -> tuple[Path, list[str]]:
+    """Merge a run's pins and exclusions into ``labels/<slug>.yaml``.
+
+    Returns ``(path, changes)``; ``changes`` is empty when the label already
+    said everything the run's overrides do.
+    """
+    from ruamel.yaml import YAML
+
+    item_kinds = item_kinds or {}
+    path = Path(labels_dir) / f"{slug_name}.yaml"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{path} does not exist — run `ats-tailor labels init` for this JD first"
+        )
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+    yaml.width = 4096
+    yaml.indent(mapping=2, sequence=4, offset=2)
+    data = yaml.load(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: file must contain a mapping at the top level")
+
+    changes: list[str] = []
+    for item in pin_items:
+        key = "pin_roles" if item_kinds.get(item) == "role" else "pin_projects"
+        _add_to(data, key, item, changes)
+    for item in exclude_items:
+        _add_to(data, "exclude", item, changes)
+
+    if changes:
+        import io as _io
+
+        buffer = _io.StringIO()
+        yaml.dump(data, buffer)
+        path.write_text(buffer.getvalue())
+    return path, changes
+
+
+def _add_to(data, key: str, value: str, changes: list[str]) -> None:
+    existing = data.get(key)
+    if existing is None:
+        data[key] = [value]
+        changes.append(f"{key}: + {value}")
+        return
+    if value in list(existing):
+        return
+    existing.append(value)
+    changes.append(f"{key}: + {value}")
 
 
 def slug(jd_path: str | Path) -> str:

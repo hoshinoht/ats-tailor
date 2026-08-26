@@ -110,6 +110,10 @@ HEADER_CLAIMS = _bool("ATS_HEADER_CLAIMS", False)
 PIN_SKILL_GROUPS = _str("ATS_PIN_SKILL_GROUPS", "Programming Languages")
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or None
 
+# Runtime store (SQLite: embeddings, JD profiles, run records). Empty means
+# "beside the index directory" — see ats_tailor.store.data_dir.
+DATA_DIR = _str("ATS_DATA_DIR", "")
+
 # Page budget
 MAX_EXPERIENCE = _int("ATS_MAX_EXPERIENCE", 3)
 MAX_PROJECTS = _int("ATS_MAX_PROJECTS", 4)
@@ -186,6 +190,14 @@ def validate_config(ignore_parse_keys=None):
         errors.append("ATS_MIN_CERTIFICATIONS cannot exceed ATS_MAX_CERTIFICATIONS")
     if CERT_THRESHOLD < 0:
         errors.append("ATS_CERT_THRESHOLD must be zero or positive")
+
+    # Only a typo is worth catching here: the directory is created on demand,
+    # and a relative one is resolved against the working directory on purpose.
+    if os.environ.get("ATS_DATA_DIR") is not None and not DATA_DIR.strip():
+        errors.append("ATS_DATA_DIR must name a directory, or be left unset")
+    elif DATA_DIR.strip() and Path(DATA_DIR).expanduser().exists() \
+            and not Path(DATA_DIR).expanduser().is_dir():
+        errors.append(f"ATS_DATA_DIR must be a directory, got {DATA_DIR!r}")
 
     if errors:
         raise ValueError("Invalid configuration:\n- " + "\n- ".join(errors))

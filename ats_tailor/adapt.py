@@ -13,7 +13,7 @@ and costs.
 from __future__ import annotations
 
 import math
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from ats_match import Claim, Requirement, SectionRule
 
@@ -79,21 +79,31 @@ def visible_items(index: Index) -> list[tuple[str, Role | Project]]:
     ]
 
 
-def claims_from_index(index: Index, chars_per_line: int | None = None) -> list[Claim]:
+def claims_from_index(
+    index: Index,
+    chars_per_line: int | None = None,
+    text_overrides: Mapping[str, str] | None = None,
+) -> list[Claim]:
     """One claim per bullet of every visible entry.
 
     ``cost`` is the number of rendered lines the bullet is expected to take, on
     the same characters-per-line estimate ``selection.estimate_line_count``
     uses, so the solver's budget and the page-fit estimate speak one unit.
+
+    ``text_overrides`` (bullet id → replacement text) is substituted *here*, so
+    the edited wording is what gets embedded, what gets costed, and what the
+    keyword-in-context bonus reads — a per-run rephrase changes the decision,
+    not only the page.
     """
     chars_per_line = int(chars_per_line or config.CHARS_PER_BULLET_LINE)
+    text_overrides = dict(text_overrides or {})
     skills = index.skill_map()
     claims: list[Claim] = []
     for section, item in visible_items(index):
         item_terms = [*surface_forms(index, item.skills), *item.keywords]
         prior_base = PRIOR_RECENCY * recency_prior(item.period)
         for bullet in item.bullets:
-            text = bullet.text.strip()
+            text = str(text_overrides.get(bullet.id, bullet.text)).strip()
             if not text:
                 continue
             claims.append(
@@ -293,15 +303,24 @@ def pinned_skill_groups(settings=config) -> set[str]:
 
 
 # ── Selection → template context ─────────────────────────────────────────────
-def render_context(selection, index: Index, claims: Sequence[Claim] | None = None):
+def render_context(
+    selection,
+    index: Index,
+    claims: Sequence[Claim] | None = None,
+    text_overrides: Mapping[str, str] | None = None,
+):
     """``(experience, projects, skill_lines)`` in the shapes the template wants.
 
     Bullets keep the entry's own order (a selection ordered by gain would read
     as a jumble), entries are chronological, and skill lines are ordered by how
     much their category won — that ordering is the only place the solver's
     ranking survives into the page.
+
+    ``text_overrides`` is the same map ``claims_from_index`` was built with, so
+    the page prints the wording the solver actually chose on.
     """
     legacy_skills, legacy_projects, legacy_exp, _certs, _summary = to_legacy(index)
+    text_overrides = dict(text_overrides or {})
     by_id = {c.id: c for c in (claims or [])}
     chosen = set(selection.claim_ids)
 
@@ -311,7 +330,7 @@ def render_context(selection, index: Index, claims: Sequence[Claim] | None = Non
         for position, bullet in enumerate(item.bullets)
     }
     bullet_text = {
-        bullet.id: bullet.text
+        bullet.id: str(text_overrides.get(bullet.id, bullet.text))
         for _section, item in visible_items(index)
         for bullet in item.bullets
     }

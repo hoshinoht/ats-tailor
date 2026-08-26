@@ -9,6 +9,9 @@ Subcommands:
 - ``check``    — compile a rendered resume and check that an ATS can read it
 - ``labels``   — scaffold the per-JD ground truth files ``eval`` scores against
 - ``eval``     — run the pipeline over every label and print the metric table
+- ``sync``     — bring the runtime store in line with the index
+- ``override`` — edit a run's ``overrides.yaml``
+- ``runs``     — the application tracker
 """
 
 from __future__ import annotations
@@ -27,8 +30,11 @@ commands:
   migrate   convert a v1 index directory to the v2 layout
   schema    write JSON Schema files for the v2 index
   check     ATS parse + keyword check on a rendered resume
-  labels    manage per-JD ground truth (labels init ...)
+  labels    manage per-JD ground truth (labels init | list | from-run)
   eval      score the pipeline against the labels
+  sync      update the runtime store from the index (--embed to pre-embed)
+  override  edit the per-run overrides.yaml next to a run's output
+  runs      application tracker (runs list | show | status | note | quiet)
 """
 
 
@@ -118,6 +124,175 @@ def _cmd_schema(argv: list[str]) -> int:
     for path in written:
         print(f"wrote {path}")
     return 0
+
+
+def _open_store(index_dir, data_dir=None):
+    """The store for this invocation: ``--data-dir`` wins, else the index's."""
+    from .store import Store, store_path
+
+    if data_dir:
+        return Store(Path(data_dir) / "ats.db")
+    return Store(store_path(index_dir))
+
+
+def _cmd_sync(argv: list[str]) -> int:
+    from .sync import sync
+
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor sync",
+        description="Upsert every index entity into the runtime store, prune what "
+                    "the index no longer has, and optionally pre-compute embeddings.")
+    parser.add_argument("--index", default="index", help="index directory (default: index/)")
+    parser.add_argument("--data-dir", default=None,
+                        help="store directory (default: ATS_DATA_DIR, else <index>/../data/)")
+    parser.add_argument("--embed", action="store_true",
+                        help="pre-compute claim, skill and certification embeddings")
+    parser.add_argument("--model", default=None,
+                        help="embedding model to pre-compute for (default: ATS_EMBED_MODEL)")
+    args = parser.parse_args(argv)
+
+    try:
+        store = _open_store(args.index, args.data_dir)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        report = sync(args.index, embed=args.embed, model=args.model, store=store)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    print(f"store: {store.path}")
+    print(report.render())
+    return 0
+
+
+def _cmd_override(argv: list[str]) -> int:
+    from . import overrides as overrides_mod
+
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor override",
+        description="Edit (or create) the overrides.yaml a v2 run reads from its "
+                    "output directory. Re-run `tailor --engine v2 --output <dir>` "
+                    "to apply it.")
+    parser.add_argument("out_dir", help="run output directory")
+    parser.add_argument("--pin", action="append", default=[], metavar="ID",
+                        help="role/project id that must be shown")
+    parser.add_argument("--exclude", action="append", default=[], metavar="ID",
+                        help="role/project id that must never be shown")
+    parser.add_argument("--pin-bullet", action="append", default=[], metavar="ID",
+                        help="bullet id that must be shown (pins its item too)")
+    parser.add_argument("--exclude-bullet", action="append", default=[], metavar="ID")
+    parser.add_argument("--text", action="append", default=[], metavar="ID=TEXT",
+                        help="replacement phrasing for one bullet, this run only")
+    parser.add_argument("--summary", default=None,
+                        help="replacement summary text ('' drops the section)")
+    parser.add_argument("--budget-lines", type=int, default=None,
+                        help="claim-line budget, replacing the computed one")
+    parser.add_argument("--show", action="store_true", help="print the file and exit")
+    args = parser.parse_args(argv)
+
+    path = overrides_mod.overrides_path(args.out_dir)
+    if args.show:
+        if not path.is_file():
+            print(f"no overrides file at {path}")
+            return 1
+        print(path.read_text().rstrip())
+        return 0
+
+    edits: dict[str, str] = {}
+    for item in args.text:
+        bullet_id, sep, replacement = item.partition("=")
+        if not sep or not bullet_id.strip():
+            print(f"error: --text expects ID=TEXT, got {item!r}", file=sys.stderr)
+            return 1
+        edits[bullet_id.strip()] = replacement
+
+    try:
+        current, changes = overrides_mod.edit(
+            path, pin=args.pin, exclude=args.exclude, pin_bullet=args.pin_bullet,
+            exclude_bullet=args.exclude_bullet, text=edits, summary=args.summary,
+            budget_lines=args.budget_lines,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"wrote {path}")
+    for change in changes or ["(no change)"]:
+        print(f"  {change}")
+    print(f"  now: {current.summary_line()}")
+    return 0
+
+
+def _cmd_runs(argv: list[str]) -> int:
+    from .store import STATUSES, StatusError
+    from .tracker import QUIET_DAYS, render_list, render_quiet, render_show, quiet_runs
+
+    parser = argparse.ArgumentParser(prog="ats-tailor runs")
+    parser.add_argument("--index", default="index", help="index directory (default: index/)")
+    parser.add_argument("--data-dir", default=None, help="store directory")
+    sub = parser.add_subparsers(dest="action", required=True)
+
+    listing = sub.add_parser("list", help="every recorded run, newest first")
+    listing.add_argument("--status", default=None, choices=list(STATUSES))
+    listing.add_argument("--company", default=None)
+
+    show = sub.add_parser("show", help="one run in full")
+    show.add_argument("run_id")
+
+    status = sub.add_parser("status", help="move a run's status")
+    status.add_argument("run_id")
+    status.add_argument("status", choices=list(STATUSES))
+    status.add_argument("--note", default=None, help="why, in the user's words")
+
+    note = sub.add_parser("note", help="add a dated note to a run")
+    note.add_argument("run_id")
+    note.add_argument("text")
+
+    quiet = sub.add_parser("quiet", help="open applications nobody has heard from")
+    quiet.add_argument("--days", type=int, default=QUIET_DAYS)
+
+    args = parser.parse_args(argv)
+    try:
+        store = _open_store(args.index, args.data_dir)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        if args.action == "list":
+            print(render_list(store.list_runs(status=args.status, company=args.company)))
+            return 0
+        if args.action == "quiet":
+            print(render_quiet(quiet_runs(store, args.days), args.days))
+            return 0
+
+        run = store.get_run(args.run_id)
+        if run is None:
+            print(f"error: no such run: {args.run_id}", file=sys.stderr)
+            return 1
+        if args.action == "show":
+            print(render_show(run, store.notes(run.id)))
+            return 0
+        if args.action == "note":
+            added = store.add_note(run.id, args.text)
+            print(f"{run.id}: noted at {added.created_at}")
+            return 0
+        if args.action == "status":
+            try:
+                updated = store.set_status(run.id, args.status, args.note)
+            except StatusError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            print(f"{run.id}: {run.status} -> {updated.status}")
+            if updated.data.get("applied_at"):
+                print(f"  applied_at {updated.data['applied_at']}")
+            return 0
+    finally:
+        store.close()
+    return 2
 
 
 def _resolve_profile(explicit, index_dir):
@@ -245,7 +420,17 @@ def _cmd_labels(argv: list[str]) -> int:
     listing = sub.add_parser("list", help="list the label files and their pins")
     listing.add_argument("--labels-dir", default="labels")
 
+    from_run = sub.add_parser(
+        "from-run", help="merge a run's pins and exclusions into its label file")
+    from_run.add_argument("run", help="run output directory or run id")
+    from_run.add_argument("--labels-dir", default="labels", help="default: labels/")
+    from_run.add_argument("--index", default="index", help="index directory (default: index/)")
+    from_run.add_argument("--data-dir", default=None, help="store directory")
+
     args = parser.parse_args(argv)
+
+    if args.action == "from-run":
+        return _labels_from_run(args)
 
     if args.action == "list":
         try:
@@ -269,6 +454,69 @@ def _cmd_labels(argv: list[str]) -> int:
         return 1
     print(f"wrote {path}")
     return 0
+
+
+def _labels_from_run(args) -> int:
+    """``labels from-run``: promote one run's overrides into its label file."""
+    from .labels import merge_overrides, slug
+    from .tailor import load_index_for_terms
+
+    try:
+        store = _open_store(args.index, args.data_dir)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        run = _resolve_run(store, args.run)
+    finally:
+        store.close()
+    if run is None:
+        print(f"error: no recorded run for {args.run!r}", file=sys.stderr)
+        return 1
+
+    overrides = run.data.get("overrides") or {}
+    pins = list(overrides.get("pin_items") or [])
+    excludes = list(overrides.get("exclude_items") or [])
+    if not pins and not excludes:
+        print(f"{run.id}: no pins or exclusions to promote")
+        return 0
+
+    jd_path = run.data.get("jd_path")
+    if not jd_path:
+        print(f"error: {run.id} has no recorded JD path, so its label file is unknown",
+              file=sys.stderr)
+        return 1
+
+    try:
+        index = load_index_for_terms(args.index)
+        path, changes = merge_overrides(
+            args.labels_dir, slug(jd_path), pins, excludes, index.item_kinds())
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if not changes:
+        print(f"{path}: already up to date with {run.id}")
+        return 0
+    print(f"updated {path} from {run.id}")
+    for change in changes:
+        print(f"  {change}")
+    return 0
+
+
+def _resolve_run(store, reference: str):
+    """A run id, or the newest run recorded for an output directory."""
+    run = store.get_run(reference)
+    if run is not None:
+        return run
+    path = Path(reference)
+    if not path.exists():
+        return None
+    wanted = path.resolve()
+    for candidate in store.list_runs():
+        if candidate.out_dir and Path(candidate.out_dir).resolve() == wanted:
+            return candidate
+    return None
 
 
 def _cmd_eval(argv: list[str]) -> int:
@@ -315,6 +563,9 @@ def _cmd_eval(argv: list[str]) -> int:
 
 COMMANDS = {
     "tailor": _cmd_tailor,
+    "sync": _cmd_sync,
+    "override": _cmd_override,
+    "runs": _cmd_runs,
     "validate": _cmd_validate,
     "migrate": _cmd_migrate,
     "schema": _cmd_schema,

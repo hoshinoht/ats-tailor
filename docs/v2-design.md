@@ -176,8 +176,25 @@ time.
 - `embeddings(content_hash, model, vec BLOB)` — replaces `.emb_cache/*.npy`
 - `jd_profiles(jd_hash, model, prompt_version, json, edited_json)`
 - `runs(id, jd_hash, config_hash, created, status, json)`
-- `overrides(run_id, json)` — pins, exclusions, edited text, reweighted reqs
-- `labels(jd_hash, json)` — eval ground truth, derived from overrides + manual
+- `run_notes(run_id, created_at, note)` — the tracker's history
+
+Built in 3b (`ats_tailor/store.py`), with two tables from the original sketch
+deliberately absent:
+
+- **`overrides`** is not its own table. An override is a file the user edits
+  (`<out_dir>/overrides.yaml`) and a copy inside the run record's `json`. A
+  third representation would be a third thing to keep in sync, and the file is
+  the one a human reads.
+- **`labels`** stays YAML in the repo. Ground truth is reviewed in pull
+  requests and hand-edited; putting it in a gitignored database would make the
+  eval's fixed point untrackable. `ats-tailor labels from-run` moves a run's
+  decisions *into* the YAML instead.
+
+`entities.id` is namespaced by kind (`project:carehaven`): items and skills are
+validated in separate id namespaces in the index and share one primary key
+here. Vectors are stored as float32 bytes with their `dim`, row-normalised on
+write and re-normalised on read; a fresh encode is read back through the store
+before use so a cold run and a warm one cannot differ in the last bits.
 
 ## 5. Pipeline v2
 
@@ -350,7 +367,7 @@ compose run --rm -it app ats-tailor tui` for the TUI, `ats-tailor serve`
 | 1 | Schema, per-entity layout, migration, compat loader, `pyproject`/`uv`, CLI (`validate`, `migrate`), tests | — |
 | 2 | `check` (parse + keyword coverage on PDF), labels format, `eval` baseline on v1 pipeline | 1 |
 | 3a | **Delivered.** `ats-match` core (types, BM25, RRF, greedy selection, metrics) in a uv workspace; adapter index→claims; deterministic requirement parser; v2 pipeline with compile loop behind `--engine v2`; eval parity with v1 | 1, 2 |
-| 3b | SQLite runtime store (`entities`, `embeddings`, `jd_profiles`, `runs`, `overrides`, `labels`), `sync`, per-run `overrides.yaml` honoured by selection (pins/excludes/edited text), run records | 3a |
+| 3b | **Delivered.** SQLite runtime store (`entities`, `embeddings`, `jd_profiles`, `runs`, `run_notes`), `sync`, per-run `overrides.yaml` honoured by selection (pins/excludes/edited text/requirement edits), run records and the tracker, `labels from-run` | 3a |
 | 3c | LLM provider interface (`ollama|lmstudio|mlx|none|external`), requirement extraction + gates, alias-aligned surface forms in rendering, summary variants + target title, v2 becomes the default engine | 3b |
 | 4 | `service.py`, LLM provider interface, Textual TUI, MCP server, Dockerfile/Compose | 3 |
 | 5 | Variant proposals + summary polish with metric guardrail (agent via MCP or local model), approval in TUI | 4 |
@@ -428,3 +445,40 @@ Deviations from `docs/plans/phase-3a.md`, all deliberate:
 - The keyword-in-context bonus counts the terms a claim's own words carry, not
   the ones it is tagged with — the keyword check reads the page, and a bullet
   tagged `docker` need not say "Docker" (`adapt.PAGE_TERMS_ATTR`).
+
+### 3b result (2026-08-26)
+
+The store, overrides and tracker are infrastructure, so the exit criterion was
+that they change *nothing*: `ats-tailor eval --engine v2` over the same 14
+labelled JDs, with every embedding now coming from `data/ats.db` instead of
+`index/.emb_cache/*.npy`, reproduced `eval/f647ef74f75b.json` exactly —
+must 75.02%, nice 33.44%, context 51.43%, parse 14/14, pages 1.00, and every
+per-JD selection, budget and gap list identical (`eval/c353d77de549.json`; the
+config hash moves only because `code_hash` covers the new modules).
+
+That parity is not automatic and cost two design decisions:
+
+- **float32 storage must not leak into the run.** A vector encoded now and a
+  vector read back from SQLite later have to be the same vector, or a cold run
+  and a warm one drift apart in the last bits for no reason a user could ever
+  diagnose. `encode_store` therefore writes and then *re-reads* what it just
+  encoded, so every path through the cache returns the stored value.
+- **Batch composition had to be checked, not assumed.** Where the `.npy` cache
+  keyed on the whole list of texts, the store keys on each text, so a run after
+  an edit encodes a different batch than the one that filled the cache.
+  Measured on `all-MiniLM-L12-v2`: encoding a text alone, in a pair, or in a
+  full batch gives bit-identical vectors, so per-text caching is safe. A model
+  where that stopped being true would show up as eval drift with no code change
+  behind it.
+
+Deviations from `docs/plans/phase-3b.md`, all deliberate:
+
+- No `overrides` or `labels` table (see §4): the override is the file plus a
+  copy in the run record, and ground truth stays in tracked YAML.
+- `entities.id` is namespaced by kind, since a skill and a project may share an
+  id in the index but not in one primary key.
+- `sync --embed` also pre-computes certification texts, which the v2 pipeline
+  now reads from the store too — otherwise the "no run waits for a model"
+  promise would hold for everything except the Certifications section.
+- `eval` passes `--no-record` rather than the tracker inspecting its caller. A
+  sweep is measurement; the flag says so where it can be read.
