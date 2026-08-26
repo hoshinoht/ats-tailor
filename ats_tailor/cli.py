@@ -287,6 +287,8 @@ def _cmd_eval(argv: list[str]) -> int:
     parser.add_argument("--llm", action="store_true", help="enable LLM keyword expansion")
     parser.add_argument("--rerank", action="store_true", help="enable cross-encoder reranking")
     parser.add_argument("--only", nargs="+", default=None, help="evaluate only these slugs")
+    parser.add_argument("--engine", choices=["v1", "v2"], default="v1",
+                        help="selection engine to evaluate (default: v1)")
     parser.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"), default=None,
                         help="print the per-metric delta between two eval results")
     args = parser.parse_args(argv)
@@ -298,7 +300,8 @@ def _cmd_eval(argv: list[str]) -> int:
     try:
         payload = evaluate(
             args.index, args.labels_dir, args.jd_dir, args.out,
-            profile_path=args.profile, llm=args.llm, rerank=args.rerank, only=args.only,
+            profile_path=args.profile, llm=args.llm, rerank=args.rerank,
+            only=args.only, engine=args.engine,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -15,7 +15,6 @@ import json
 import math
 import re
 import sys
-from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -68,6 +67,7 @@ from .llm import (
     detect_coverage_gaps,
     expand_jd_with_llm,
 )
+from .results import RunResult
 
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
@@ -79,39 +79,8 @@ def _safe_slug(*parts):
     return slug or "resume"
 
 
-@dataclass
-class RunResult:
-    """What one pipeline run produced, for callers that need it in-process.
-
-    ``role_ids``/``project_ids`` are in *score* order (the order selection
-    ranked them), not the chronological order the page renders, so evaluation
-    can measure ranking quality. ``entries`` is what ``atscheck.parse_check``
-    needs to verify each rendered entry's date line.
-    """
-
-    out_dir: Path
-    tex_path: Path
-    company: str
-    role: str
-    role_ids: list[str] = field(default_factory=list)
-    project_ids: list[str] = field(default_factory=list)
-    cert_ids: list[str] = field(default_factory=list)
-    skill_lines: list[dict] = field(default_factory=list)
-    entries: list[dict] = field(default_factory=list)
-
-    def to_dict(self):
-        return {
-            "company": self.company,
-            "role": self.role,
-            "out_dir": str(self.out_dir),
-            "tex": self.tex_path.name,
-            "roles": self.role_ids,
-            "projects": self.project_ids,
-            "certifications": self.cert_ids,
-            "skill_lines": self.skill_lines,
-            "entries": self.entries,
-        }
-
+# ``RunResult`` is imported, not defined here: v2 produces one too, and no
+# importer should have to care which engine made it.
 
 @lru_cache(maxsize=4)
 def _load_embedder(model_name):
@@ -161,6 +130,9 @@ def run(argv=None):
                         help="LLM backend (env: ATS_LLM_BACKEND, default: auto)")
     parser.add_argument("--check", action="store_true",
                         help="compile the PDF and run the ATS parse/keyword check")
+    parser.add_argument("--engine", choices=["v1", "v2"], default=config.ENGINE,
+                        help=f"selection engine (env: ATS_ENGINE, default: {config.ENGINE}); "
+                             "v1 ranks whole items, v2 covers parsed requirements")
     args = parser.parse_args(raw_args)
 
     # Wire CLI --llm-backend to config so llm.py picks it up
@@ -209,6 +181,17 @@ def run(argv=None):
     # ── Load profile ──
     print(f"Loading profile from {profile_path}...")
     profile = load_profile(profile_path)
+
+    if args.engine == "v2":
+        if args.llm:
+            # v2 reads the posting through its own requirement parser; putting
+            # invented keywords in front of that would tier and weight text the
+            # posting never contained. LLM extraction arrives in Phase 3c.
+            print("  Note: --llm is ignored by the v2 engine (see docs/plans/phase-3a.md)")
+        result = _run_v2(args, jd_text, profile, index_dir, out_dir)
+        if args.check:
+            _run_ats_check(result, profile, index_dir, jd_text, out_dir, args.company)
+        return result
 
     # ── Load index ──
     print(f"Loading YAML index from {index_dir}...")
@@ -591,30 +574,56 @@ def run(argv=None):
     (out_dir / "selection.json").write_text(json.dumps(result.to_dict(), indent=2) + "\n")
 
     if args.check:
-        from .atscheck import (
-            compile_pdf, extract_text, index_term_forms, keyword_coverage,
-            output_filename, parse_check, resolve_terms, split_regions, summarize,
-            surface_form_set, write_reports,
-        )
-        from .atscheck import auto_terms as _auto_terms
-
-        print("\nCompiling and checking the PDF...")
-        compiled = compile_pdf(
-            result.tex_path, output_filename(profile.get("name", ""), args.company))
-        text = extract_text(compiled.pdf_path)
-        parse_report = parse_check(text, profile, result.entries, compiled.pages)
-
-        index_obj = load_index_for_terms(index_dir)
-        terms = index_term_forms(index_obj)
-        must, nice = _auto_terms(jd_original, index_obj)
-        selected = resolve_terms([*must, *nice], terms)
-        coverage = keyword_coverage(
-            text, selected, surface_form_set(terms), split_regions(text), must=must)
-        write_reports(out_dir, parse_report, coverage)
-        print(summarize(parse_report, coverage))
-        print(f"  reports: {out_dir / 'ats_check.md'}, {out_dir / 'ats_check.json'}")
+        _run_ats_check(result, profile, index_dir, jd_original, out_dir, args.company)
 
     return result
+
+
+def _run_v2(args, jd_text, profile, index_dir, out_dir):
+    """The v2 engine, which needs the typed index rather than the v1 dicts."""
+    from .index_io import detect_layout, load_index_v2
+    from .pipeline import V2Options, tailor_v2
+
+    if detect_layout(index_dir) != "v2":
+        print(f"Error: --engine v2 needs a v2 index layout; {index_dir} is v1. "
+              f"Run `ats-tailor migrate` first.", file=sys.stderr)
+        sys.exit(1)
+    print(f"Loading v2 index from {index_dir}...")
+    index = load_index_v2(index_dir)
+    return tailor_v2(
+        jd_text, index, profile, args.company, args.role, out_dir,
+        V2Options(model=args.model, index_dir=index_dir, rerank=args.rerank),
+    )
+
+
+def _run_ats_check(result, profile, index_dir, jd_text, out_dir, company):
+    """Compile the rendered resume and run the parse + keyword coverage checks.
+
+    Shared by both engines: the check reads the PDF and ``result.entries``, and
+    neither depends on how the content was selected.
+    """
+    from .atscheck import (
+        auto_terms, compile_pdf, extract_text, index_term_forms, keyword_coverage,
+        output_filename, parse_check, resolve_terms, split_regions, summarize,
+        surface_form_set, write_reports,
+    )
+
+    print("\nCompiling and checking the PDF...")
+    compiled = compile_pdf(
+        result.tex_path, output_filename(profile.get("name", ""), company))
+    text = extract_text(compiled.pdf_path)
+    parse_report = parse_check(text, profile, result.entries, compiled.pages)
+
+    index_obj = load_index_for_terms(index_dir)
+    terms = index_term_forms(index_obj)
+    must, nice = auto_terms(jd_text, index_obj)
+    selected = resolve_terms([*must, *nice], terms)
+    coverage = keyword_coverage(
+        text, selected, surface_form_set(terms), split_regions(text), must=must)
+    write_reports(out_dir, parse_report, coverage)
+    print(summarize(parse_report, coverage))
+    print(f"  reports: {out_dir / 'ats_check.md'}, {out_dir / 'ats_check.json'}")
+    return parse_report, coverage
 
 
 def load_index_for_terms(index_dir):

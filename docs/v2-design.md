@@ -349,8 +349,82 @@ compose run --rm -it app ats-tailor tui` for the TUI, `ats-tailor serve`
 |---|---|---|
 | 1 | Schema, per-entity layout, migration, compat loader, `pyproject`/`uv`, CLI (`validate`, `migrate`), tests | — |
 | 2 | `check` (parse + keyword coverage on PDF), labels format, `eval` baseline on v1 pipeline | 1 |
-| 3a | `ats-match` core (types, BM25, RRF, greedy selection, metrics) in a uv workspace; adapter index→claims; deterministic requirement parser; v2 pipeline with compile loop behind `--engine v2`; eval parity with v1 | 1, 2 |
+| 3a | **Delivered.** `ats-match` core (types, BM25, RRF, greedy selection, metrics) in a uv workspace; adapter index→claims; deterministic requirement parser; v2 pipeline with compile loop behind `--engine v2`; eval parity with v1 | 1, 2 |
 | 3b | SQLite runtime store (`entities`, `embeddings`, `jd_profiles`, `runs`, `overrides`, `labels`), `sync`, per-run `overrides.yaml` honoured by selection (pins/excludes/edited text), run records | 3a |
 | 3c | LLM provider interface (`ollama|lmstudio|mlx|none|external`), requirement extraction + gates, alias-aligned surface forms in rendering, summary variants + target title, v2 becomes the default engine | 3b |
 | 4 | `service.py`, LLM provider interface, Textual TUI, MCP server, Dockerfile/Compose | 3 |
 | 5 | Variant proposals + summary polish with metric guardrail (agent via MCP or local model), approval in TUI | 4 |
+
+### 3a result (2026-08-26)
+
+`ats-tailor eval --engine v2` over the 14 labelled JDs
+(`eval/f647ef74f75b.json`), against the Phase 2 v1 baseline
+`eval/d184bc9cec11.json`:
+
+| metric | v1 | v2 | delta |
+|---|---|---|---|
+| must_coverage | 75.02% | 75.02% | +0.000 |
+| nice_coverage | 34.33% | 33.44% | −0.009 |
+| context_rate | 37.35% | 51.43% | **+0.141** |
+| parse_ok | 100% | 100% | +0.000 |
+| pages | 1.00 | 1.00 | +0.000 |
+| exclusion_violations | 0 | 0 | +0.000 |
+
+The exit criterion (must, context and parse ≥ v1, one page everywhere) holds, so
+v2 is ready to become the default in 3c. Three things had to be measured rather
+than assumed, and each is recorded where it is implemented:
+
+- **Rank fusion alone is not a score.** Min-max over an RRF row makes every
+  requirement's best claim a 1.0, so a posting's boilerplate looked as covered
+  as its "Kubernetes" line and the greedy spent the page on soft skills. The
+  fused rank is multiplied by a relevance gate — cosine, or the share of the
+  requirement's terms the claim carries, whichever is higher
+  (`ats_match.fusion.build_matrix`).
+- **β = 0.2 is inert.** Coverage is a weighted sum over every requirement while
+  `ctx` is one share in [0, 1]. At 3.0 the context bonus moves the metric ~9
+  points; past ~5 it starts buying context at the expense of coverage.
+- **A requirement that names nothing is noise with a weight on it.** A third of
+  a posting is culture and benefits prose ("Works well independently and with
+  others"). Every claim answers it about equally well, so the weight it carries
+  is spent on nothing; at `ATS_SOFT_REQ_WEIGHT` = 0.25 it stays in the report
+  and stops steering the page (context +4.2 points).
+- **Free claims need a floor, not a budget.** A skill costs no lines, so the
+  greedy keeps taking them for whatever their proficiency prior is worth.
+  `SectionRule.min_gain` stops that. The floor is sharp: 0.0–0.01 removes
+  nothing, 0.02–0.03 removes the tail, 0.05 deletes skills the posting asked
+  for (must 75.0% → 74.1%, context 51.4% → 43.2%). Shipped at 0.03.
+- **The objective cannot see a header.** Opening a group costs lines but its
+  title and organisation are on the page and an ATS reads them. Groups are
+  therefore opened up to `max_groups` *after* the greedy has chosen depth on
+  merit, paid for by dropping the lowest-gain claims — a layout decision, not
+  an objective term (`ats_match.select._open_to_max`).
+- **Making the header a claim does not work, and the reason is instructive.**
+  `ats_match` supports header claims (`attrs["header"]`: included free when a
+  group opens, dropped with it) and `adapt.header_claims` builds them, behind
+  `ATS_HEADER_CLAIMS`, off by default. Measured: context_rate 51.4% → 37.9%
+  with the floor off, and must_coverage 75.0% → 74.2% with it on; the term the
+  feature was designed to recover ("Software Engineering", which exists only in
+  a job title) is still missing either way. Two mechanisms, both real: a
+  header's coverage saturates the requirements a keyword-bearing bullet would
+  otherwise have been picked for, and `atscheck` builds its bullets region by
+  dropping entry and `Technologies:` lines, so a header can never satisfy the
+  in-context test the bonus optimises. Headers are worth *rendering*, not
+  worth *bidding with*.
+
+The cross-encoder reranker (`ATS_RERANK`, `cross-encoder/ms-marco-MiniLM-L-6-v2`
+over the top 5 claims per requirement) was measured once, not shipped: must
+75.02% → 75.02%, nice 33.44% → 34.04%, context 51.43% → 48.30%, at 2.2× the wall
+clock (45.8s → 101.2s for 14 JDs, 3.3 → 7.2 seconds per posting). It moves
+nothing that matters and loses three points of context. 3c should spend that
+latency budget on requirement extraction instead.
+
+Deviations from `docs/plans/phase-3a.md`, all deliberate:
+
+- The soft pool is `τ·log(1 + Σ(exp(x/τ) − 1))` rather than plain log-sum-exp,
+  which would score the empty set −∞ and let zero-scoring claims accumulate
+  `τ·log|S|` of coverage they never earned.
+- The greedy ranks by gain *per rendered line*, not raw gain: with a budget
+  rather than a cardinality limit, raw gain spends the page on long bullets.
+- The keyword-in-context bonus counts the terms a claim's own words carry, not
+  the ones it is tagged with — the keyword check reads the page, and a bullet
+  tagged `docker` need not say "Docker" (`adapt.PAGE_TERMS_ATTR`).

@@ -79,6 +79,35 @@ LLM_TEMPERATURE_P1 = _float("ATS_LLM_TEMPERATURE_P1", 0.2)
 LLM_TEMPERATURE_P2 = _float("ATS_LLM_TEMPERATURE_P2", 0.5)
 LLM_TWO_PASS = _bool("ATS_LLM_TWO_PASS")
 RERANK = _bool("ATS_RERANK")
+# Selection engine: "v1" (item ranking) or "v2" (requirement coverage)
+ENGINE = _str("ATS_ENGINE", "v1")
+# v2 objective knobs (ats_match.Params): soft-pool temperature, redundancy
+# penalty, keyword-in-context bonus.
+SELECT_TAU = _float("ATS_TAU", 0.1)
+SELECT_MU = _float("ATS_MU", 0.3)
+SELECT_BETA = _float("ATS_BETA", 3.0)
+SELECT_REDUNDANCY_IN_SKILLS = _bool("ATS_REDUNDANCY_IN_SKILLS", False)
+SELECT_BREADTH_FIRST = _bool("ATS_BREADTH_FIRST", True)
+# Weight of a requirement that names nothing the index or the posting's own
+# vocabulary can be matched against ("Works well independently and with others").
+SOFT_REQ_WEIGHT = _float("ATS_SOFT_REQ_WEIGHT", 0.25)
+# Gain a skill must earn to be listed. Skills cost no lines, so without a floor
+# a skills line fills up with whatever has the highest proficiency prior.
+# Measured over the labelled JDs: 0.0-0.01 removes nothing, 0.02-0.03 removes
+# the tail without touching coverage, 0.05 starts deleting skills the posting
+# actually asked for (must 75.0% -> 74.1%, context 51.4% -> 43.2%).
+SKILL_MIN_GAIN = _float("ATS_SKILL_MIN_GAIN", 0.03)
+# Feed each entry's header line (title/organisation, or name/tagline plus the
+# Technologies line) to the matcher as a claim that arrives free with its group.
+# Off by default, on evidence: measured over the labelled JDs it costs 13.5
+# points of context_rate (51.4% -> 37.9%) without recovering the must-term the
+# idea was meant to recover. A header's coverage saturates the requirements a
+# keyword-bearing bullet would otherwise have been picked for, and the keyword
+# check does not read header lines as bullets. See docs/v2-design.md §8.
+HEADER_CLAIMS = _bool("ATS_HEADER_CLAIMS", False)
+# Skill categories that always get a line, whatever they score. v1 always
+# rendered a Languages line and a resume without one reads as incomplete.
+PIN_SKILL_GROUPS = _str("ATS_PIN_SKILL_GROUPS", "Programming Languages")
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or None
 
 # Page budget
@@ -109,6 +138,18 @@ def validate_config(ignore_parse_keys=None):
         errors.append("ATS_LLM_BACKEND must be one of: auto, mlx, lmstudio, ollama")
     if SECTION_PRIORITY not in {"experience", "projects"}:
         errors.append("ATS_SECTION_PRIORITY must be 'experience' or 'projects'")
+    if ENGINE not in {"v1", "v2"}:
+        errors.append("ATS_ENGINE must be 'v1' or 'v2'")
+    if SELECT_TAU <= 0:
+        errors.append("ATS_TAU must be positive")
+    for name, value in (
+        ("ATS_MU", SELECT_MU),
+        ("ATS_BETA", SELECT_BETA),
+        ("ATS_SOFT_REQ_WEIGHT", SOFT_REQ_WEIGHT),
+        ("ATS_SKILL_MIN_GAIN", SKILL_MIN_GAIN),
+    ):
+        if value < 0:
+            errors.append(f"{name} must be zero or positive")
 
     for name, value in [
         ("ATS_MAX_EXPERIENCE", MAX_EXPERIENCE),

@@ -14,6 +14,9 @@ uv run ats-tailor --help
 
 Optional extras: `--extra mlx` (local MLX inference), `--extra dev` (pytest).
 
+The repo is a `uv` workspace with two distributions: this application, and
+`packages/ats-match` — the pure matching core. `uv sync` builds both.
+
 ## CLI
 
 ```bash
@@ -59,6 +62,7 @@ python -m ats_tailor.tailor \
 | `--rerank`      | off                          | Re-score top candidates with a cross-encoder     |
 | `--no-rerank`   | off                          | Disable env-enabled cross-encoder reranking      |
 | `--check`       | off                          | Compile the PDF and run the ATS check afterwards |
+| `--engine`      | `v1` (env `ATS_ENGINE`)      | `v1` ranks whole items; `v2` covers parsed requirements |
 
 ## Configuration
 
@@ -96,8 +100,26 @@ cp .env.example .env
 | `ATS_CHARS_PER_BULLET_LINE` | `80`                          | —               |
 | `ATS_MAX_PAGE_LINES`        | `72`                          | —               |
 | `ATS_SECTION_PRIORITY`      | `experience`                  | —               |
+| `ATS_ENGINE`                | `v1`                          | `--engine`      |
+| `ATS_TAU`                   | `0.1`                         | — (v2)          |
+| `ATS_MU`                    | `0.3`                         | — (v2)          |
+| `ATS_BETA`                  | `3.0`                         | — (v2)          |
+| `ATS_BREADTH_FIRST`         | `true`                        | — (v2)          |
+| `ATS_REDUNDANCY_IN_SKILLS`  | `false`                       | — (v2)          |
+| `ATS_SOFT_REQ_WEIGHT`       | `0.25`                        | — (v2)          |
+| `ATS_SKILL_MIN_GAIN`        | `0.03`                        | — (v2)          |
+| `ATS_PIN_SKILL_GROUPS`      | `Programming Languages`       | — (v2)          |
+| `ATS_HEADER_CLAIMS`         | `false`                       | — (v2)          |
 
 CLI flags override env vars; env vars override `.env` file values.
+
+`ATS_SKILL_MIN_GAIN` is the only gain floor wired to a setting, because skills
+are the only claims that cost no lines. `SectionRule.min_gain` supports one per
+section, so an `ATS_ROLE_MIN_GAIN` would be a one-line change in
+`adapt.section_rules()` — deliberately not wired: under v2 the last entry slot
+is filled with the best remaining role whatever it scores, which is what v1 did
+too. To leave a weak entry off the page, lower `ATS_MAX_EXPERIENCE` (or
+`ATS_MAX_PROJECTS`), or exclude the item for that posting in its label file.
 
 ## LLM keyword expansion
 
@@ -150,7 +172,7 @@ If `ATS_LLM_EXPAND=true` is set in the environment, pass `--no-llm` to force a n
 | `prompt.md`       | LLM prompt for optional bullet rewriting        |
 | `match_report.md` | Similarity scores and rankings                  |
 | `match_viz.png`   | Visual score breakdown                          |
-| `selection.json`  | What the run selected, in score order (input to `check` and `eval`) |
+| `selection.json`  | What the run selected, in score order (input to `check` and `eval`). Under `--engine v2` it also carries the parsed requirements, per-requirement coverage, and the full selection trace |
 | `ats_check.md/.json` | Parse + keyword report, written by `check` or `tailor --check` |
 
 ## ATS requirements
@@ -245,6 +267,7 @@ ranking:                    # optional full preference order
 
 ```bash
 ats-tailor eval --index index --labels-dir labels --jd-dir jd --out eval
+ats-tailor eval --engine v2 ...      # score the v2 engine instead
 ```
 
 Runs the pipeline for every label into `eval/runs/<slug>/`, compiles, checks,
@@ -264,8 +287,8 @@ label whose JD file is not on this machine is skipped with a note and listed
 under the table — labels are tracked, postings are local, so a missing one is
 normal rather than a failed sweep.
 Results are written to `eval/<config-hash>.json`, where the hash covers every
-`ATS_*` setting, the embedding model, the index content and the engine's own
-sources — so two runs are only comparable when the hash says they are, and
+`ATS_*` setting, the embedding model, the index content, the selected engine,
+and both packages' sources — so two runs are only comparable when the hash says they are, and
 editing the scorer changes the hash even before it is committed. The git HEAD
 is recorded alongside for provenance but not hashed, so committing unchanged
 code does not rename a baseline:
@@ -361,6 +384,60 @@ To start with your own data, copy `examples/`, fill in your details, and run aga
 
 ## Scoring
 
+Two engines. `--engine v1` (the default) ranks whole items against the posting;
+`--engine v2` parses the posting into requirements and covers them. Both render
+the same template and pass the same ATS check.
+
+### `--engine v2` — requirement coverage
+
+```
+maximise  Σ_r w_r · softpool_τ(M[r, S])   requirement coverage (submodular)
+        + β · ctx(S)                      must-terms in the Skills line *and* a bullet
+        − μ · redundancy(S)               near-duplicate claims inside a section
+        + Σ_{c∈S} prior_c                 small additive recency / impact / proficiency priors
+subject to  lines(S) ≤ budget, and the ATS_MIN/MAX_* limits per section
+```
+
+1. **Requirements.** The posting is chunked and each chunk tiered by the
+   heading above it (`ats-tailor check` uses the same tiering, so the metric and
+   the objective agree by construction): a requirements heading gives `must`,
+   a "nice to have" heading gives `nice`, anything else is a `responsibility`
+   at half weight. Lines with no index vocabulary *and* no requirement verb are
+   dropped; a line kept only by its verb ("Works well independently and with
+   others") is a *soft* requirement at `ATS_SOFT_REQ_WEIGHT` — still reported,
+   but not competing for page space with "a solid understanding of Kubernetes",
+   since every claim answers it about equally well. Deterministic — no model,
+   same answer every time.
+2. **Claims.** Every bullet of every visible entry, and every skill, becomes one
+   atomic claim: `cost` in rendered lines, `terms` from its skills and keywords,
+   a small `prior` from recency, impact and proficiency.
+3. **Matrix.** Per requirement, dense cosine ranks and BM25-over-aliases ranks
+   are fused with RRF, then multiplied by a *relevance gate* — the pair's cosine,
+   or the share of the requirement's terms the claim carries, whichever is
+   higher. Without the gate the top claim for a boilerplate line ("A hybrid work
+   model…") scores as confidently as the one that answers "Kubernetes".
+4. **Selection.** Lazy greedy over gain per rendered line, then a repair pass for
+   the minimums (bullets per entry, one impact bullet per project), then groups
+   are opened up to the configured maxima, paid for by dropping the claims that
+   earned least. Skills cost no lines, so they answer to a gain floor
+   (`ATS_SKILL_MIN_GAIN`) instead of the budget — without one a skills line
+   fills with whatever has the highest proficiency prior. The categories in
+   `ATS_PIN_SKILL_GROUPS` always get a line; what goes *on* it still has to
+   clear the floor.
+5. **Page fit.** Render, compile, count pages; if it spilled, cut the budget by
+   4 lines and re-solve, up to three times.
+
+`match_report.md` becomes a coverage ledger: every requirement with its kind,
+weight, best claim and coverage; the greedy trace with what each pick covered;
+the section/group summary; and the requirements left under-covered.
+
+The core of this (types, BM25, RRF, greedy, metrics) is `packages/ats-match`, a
+standalone library whose only dependency is numpy. It has no notion of a resume:
+models are injected through `Embedder` / `Reranker` protocols, and a test fails
+the build if application vocabulary leaks into it.
+
+### `--engine v1` — item ranking
+
 ```
 score(i) = (semantic(i) + keyword_bonus(i) + tag_overlap(i)) * recency(i)
            + evidence_bonus(i) + rerank_bonus(i)
@@ -375,6 +452,10 @@ score(i) = (semantic(i) + keyword_bonus(i) + tag_overlap(i)) * recency(i)
 
 `match_report.md` shows the total score plus semantic, keyword, tag, recency,
 evidence, and rerank components so selections are easier to audit.
+
+Measured against the labelled JDs (`ats-tailor eval`), v2 matches v1 on
+must-term coverage and parse rate, both stay on one page, and v2 puts
+must-terms in context (Skills line *and* a bullet) 14 points more often.
 
 See [docs/algorithm.pdf](docs/algorithm.pdf) for the full writeup.
 

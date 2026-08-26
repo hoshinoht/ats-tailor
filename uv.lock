@@ -6,6 +6,12 @@ resolution-markers = [
     "python_full_version < '3.12'",
 ]
 
+[manifest]
+members = [
+    "ats-match",
+    "ats-tailor",
+]
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.5"
@@ -38,10 +44,23 @@ wheels = [
 ]
 
 [[package]]
+name = "ats-match"
+version = "0.1.0"
+source = { editable = "packages/ats-match" }
+dependencies = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "numpy" }]
+
+[[package]]
 name = "ats-tailor"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "ats-match" },
     { name = "jinja2" },
     { name = "matplotlib" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -62,6 +81,7 @@ mlx = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ats-match", editable = "packages/ats-match" },
     { name = "jinja2" },
     { name = "matplotlib" },
     { name = "mlx-lm", marker = "extra == 'mlx'" },

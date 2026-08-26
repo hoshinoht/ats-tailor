@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from ats_match import kendall_tau, precision_at_k
+
 from . import config
 from .atscheck import (
     CompileError,
@@ -57,35 +59,10 @@ METRICS = (
 )
 
 
-# ── Ranking metrics ───────────────────────────────────────────────────────────
-def precision_at_k(ranked: Sequence[str], pins: Sequence[str]) -> float | None:
-    """Share of the top-``len(pins)`` selected items that are pinned."""
-    if not pins:
-        return None
-    k = len(pins)
-    return len(set(ranked[:k]) & set(pins)) / k
-
-
-def kendall_tau(order: Sequence[str], reference: Sequence[str]) -> float | None:
-    """Kendall τ-a between two strict orders, over the ids they share.
-
-    ``None`` when fewer than two ids overlap — a correlation over one point is
-    not a number worth averaging.
-    """
-    shared = [item for item in reference if item in set(order)]
-    if len(shared) < 2:
-        return None
-    rank = {item: i for i, item in enumerate(order)}
-    concordant = discordant = 0
-    for i in range(len(shared)):
-        for j in range(i + 1, len(shared)):
-            delta = rank[shared[i]] - rank[shared[j]]
-            if delta < 0:
-                concordant += 1
-            elif delta > 0:
-                discordant += 1
-    pairs = len(shared) * (len(shared) - 1) / 2
-    return (concordant - discordant) / pairs
+# ``precision_at_k`` and ``kendall_tau`` live in ``ats_match.evaluate``: they
+# are pure ranking metrics with no notion of a resume, and the matching core
+# needs them for its own tests. They are re-exported here so the eval harness
+# and its callers keep one import site.
 
 
 # ── Configuration fingerprint ─────────────────────────────────────────────────
@@ -116,14 +93,26 @@ def code_hash() -> str:
     being tried out — the moment the hash most needs to differ.
     """
     digest = hashlib.sha256()
-    package = Path(__file__).resolve().parent
-    for path in sorted(package.glob("*.py")) + sorted(package.glob("*.j2")):
-        digest.update(path.name.encode())
-        digest.update(path.read_bytes())
+    # Both distributions: a tuning change inside the matching core has to move
+    # the fingerprint exactly as much as one in the application does.
+    import ats_match
+
+    for package in (Path(__file__).resolve().parent, Path(ats_match.__file__).parent):
+        sources = sorted(
+            path
+            for pattern in ("*.py", "*.j2")
+            for path in package.rglob(pattern)
+            if "__pycache__" not in path.parts
+        )
+        for path in sources:
+            digest.update(f"{package.name}/{path.relative_to(package)}".encode())
+            digest.update(path.read_bytes())
     return digest.hexdigest()
 
 
-def config_fingerprint(index_dir: str | Path) -> tuple[str, dict[str, Any]]:
+def config_fingerprint(
+    index_dir: str | Path, engine: str = "v1"
+) -> tuple[str, dict[str, Any]]:
     """``(hash, the values it was computed from)``.
 
     ``git_head`` is recorded but deliberately *not* hashed: committing the
@@ -134,6 +123,7 @@ def config_fingerprint(index_dir: str | Path) -> tuple[str, dict[str, Any]]:
     values = {
         "ats_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("ATS_")},
         "embed_model": config.EMBED_MODEL,
+        "engine": engine,
         "index_hash": index_hash(index_dir),
         "code_hash": code_hash(),
     }
@@ -175,6 +165,7 @@ def evaluate_one(
     run_dir: Path,
     llm: bool = False,
     rerank: bool = False,
+    engine: str = "v1",
 ) -> dict[str, Any]:
     """Run the pipeline for one label, compile, check, and score it."""
     from .tailor import load_index_for_terms, run as run_pipeline
@@ -185,6 +176,7 @@ def evaluate_one(
         "--jd", str(jd_path), "--company", label.company, "--role", label.role,
         "--output", str(run_dir),
         "--rerank" if rerank else "--no-rerank",
+        "--engine", engine,
     ]
     argv.append("--llm" if llm else "--no-llm")
 
@@ -201,8 +193,13 @@ def evaluate_one(
     profile = _load_profile(profile_path)
     record: dict[str, Any] = {
         "slug": slug, "company": label.company, "role": label.role,
+        "engine": engine,
         "selected_projects": result.project_ids, "selected_roles": result.role_ids,
     }
+    if result.selection is not None:
+        record["requirements"] = len(result.requirements)
+        record["budget"] = result.budget
+        record["fit_iterations"] = result.iterations
 
     # ── compile + parse ──
     try:
@@ -269,6 +266,7 @@ def evaluate(
     llm: bool = False,
     rerank: bool = False,
     only: Sequence[str] | None = None,
+    engine: str = "v1",
 ) -> dict[str, Any]:
     index_dir = Path(index_dir).resolve()
     out_dir = Path(out_dir).resolve()
@@ -279,7 +277,7 @@ def evaluate(
     if not labels:
         raise ValueError(f"no label files to evaluate in {labels_dir}")
 
-    digest, values = config_fingerprint(index_dir)
+    digest, values = config_fingerprint(index_dir, engine)
     runs = []
     skipped: list[str] = []
     for i, (slug, label) in enumerate(labels.items(), start=1):
@@ -294,14 +292,14 @@ def evaluate(
         print(f"[{i}/{len(labels)}] {slug} ({label.company}/{label.role})", flush=True)
         runs.append(evaluate_one(
             slug, label, jd_path, index_dir, profile,
-            out_dir / "runs" / slug, llm=llm, rerank=rerank,
+            out_dir / "runs" / slug, llm=llm, rerank=rerank, engine=engine,
         ))
 
     payload = {
         "config_hash": digest,
         "config": values,
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "options": {"llm": llm, "rerank": rerank},
+        "options": {"llm": llm, "rerank": rerank, "engine": engine},
         "runs": runs,
         "skipped": skipped,
         "means": means(runs),

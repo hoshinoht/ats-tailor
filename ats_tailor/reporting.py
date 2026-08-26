@@ -220,3 +220,166 @@ def generate_visualization(
     fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return out_path
+
+
+# ── v2: requirement coverage ──────────────────────────────────────────────────
+KIND_COLORS = {"must": "#2563EB", "responsibility": "#10B981", "nice": "#9CA3AF"}
+_TRACE_ROWS = 40
+
+
+def _truncate(text, width=70):
+    text = " ".join(str(text).split())
+    return text if len(text) <= width else text[: width - 1].rstrip() + "…"
+
+
+def generate_v2_report(
+    company, role, requirements, claims, selection, matrix, skill_lines,
+    certs=None, selected_certs=None, gaps=None, budget=None, pages=None,
+    attempts=1, gap_threshold=0.3,
+):
+    """The v2 match report: what was asked for, what was shown, and why.
+
+    Unlike the v1 report — a ranking of whole items — this is a coverage
+    ledger: every requirement the posting was parsed into, the claim that
+    covers it best, and the greedy trace that got there.
+    """
+    by_id = {c.id: c for c in claims}
+    index_of = {c.id: i for i, c in enumerate(claims)}
+    chosen = list(selection.claim_ids)
+    coverage = selection.coverage
+
+    lines = [
+        f"# Match Report (v2): {company} – {role}",
+        "",
+        f"- requirements parsed: **{len(requirements)}** "
+        f"({sum(1 for r in requirements if r.kind == 'must')} must, "
+        f"{sum(1 for r in requirements if r.kind == 'nice')} nice, "
+        f"{sum(1 for r in requirements if r.kind == 'responsibility')} responsibility)",
+        f"- claims available: **{len(claims)}**, selected: **{len(chosen)}**",
+        f"- objective: **{selection.objective:.3f}**, "
+        f"lines used: **{selection.budget_used:.0f}**"
+        + (f" of **{budget:.0f}**" if budget is not None else ""),
+        f"- page-fit attempts: **{attempts}**"
+        + (f", final page count: **{pages}**" if pages else ""),
+        "",
+        "## Requirements",
+        "",
+        "| id | kind | w | coverage | covered | best claim | score | requirement |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for requirement in requirements:
+        best_id, best_score = _best_claim(matrix, index_of, chosen, requirement, requirements)
+        value = float(coverage.get(requirement.id, 0.0))
+        lines.append(
+            f"| {requirement.id} | {requirement.kind} | {requirement.weight:.1f} | "
+            f"{value:.2f} | {'Y' if value >= gap_threshold else ''} | "
+            f"{_md_cell(best_id or '—')} | {best_score:.2f} | "
+            f"{_md_cell(_truncate(requirement.text))} |"
+        )
+
+    lines += ["", "## Selection trace", "",
+              "| # | claim | section | group | cost | gain | opened | covers |",
+              "|---|---|---|---|---|---|---|---|"]
+    for i, step in enumerate(selection.trace[:_TRACE_ROWS], 1):
+        claim = by_id.get(step.claim_id)
+        covers = ", ".join(f"{rid} {delta:+.2f}" for rid, delta in step.covered[:3]) or "—"
+        lines.append(
+            f"| {i} | {_md_cell(step.claim_id)} | {claim.section if claim else '?'} | "
+            f"{_md_cell(claim.group if claim else '?')} | "
+            f"{claim.cost:.0f} | {step.gain:.3f} | "
+            f"{'yes' if step.opened_group else ''}{' (repair)' if step.repair else ''} | "
+            f"{covers} |"
+        )
+    if len(selection.trace) > _TRACE_ROWS:
+        lines.append(f"| … | {len(selection.trace) - _TRACE_ROWS} more | | | | | | |")
+
+    lines += ["", "## Sections", "",
+              "| section | group | claims | lines |", "|---|---|---|---|"]
+    for section, groups in selection.group_ids_by_section.items():
+        for group in groups:
+            held = [c for c in chosen if by_id.get(c) and by_id[c].group == group]
+            cost = sum(by_id[c].cost for c in held)
+            lines.append(f"| {section} | {_md_cell(group)} | {len(held)} | {cost:.0f} |")
+
+    lines += ["", "## Skills lines", "",
+              "Ordered by how much requirement weight the category won; "
+              "skills within a line by marginal gain.", ""]
+    for line in skill_lines:
+        lines.append(f"- **{line['category']}:** {line['skills']}")
+
+    if selected_certs is not None:
+        lines += ["", "## Certifications", "",
+                  ", ".join(c.get("name", "") for c in selected_certs) or "none"]
+
+    weak = [r for r in requirements if float(coverage.get(r.id, 0.0)) < gap_threshold]
+    if weak:
+        lines += ["", f"## Uncovered requirements (coverage < {gap_threshold})", "",
+                  "| id | kind | requirement |", "|---|---|---|"]
+        for requirement in weak:
+            lines.append(
+                f"| {requirement.id} | {requirement.kind} | "
+                f"{_md_cell(_truncate(requirement.text, 90))} |"
+            )
+
+    if gaps:
+        lines += ["", "## Index gaps", "",
+                  "Tech-looking terms in the posting with no claim behind them — "
+                  "report them, never stuff them.", "", ", ".join(gaps)]
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _best_claim(matrix, index_of, chosen, requirement, requirements):
+    """The selected claim covering ``requirement`` best, and its matrix score."""
+    row = list(requirements).index(requirement)
+    best_id, best_score = None, 0.0
+    for claim_id in chosen:
+        column = index_of.get(claim_id)
+        if column is None:
+            continue
+        score = float(matrix[row][column])
+        if best_id is None or score > best_score:
+            best_id, best_score = claim_id, score
+    return best_id, best_score
+
+
+def generate_requirement_visualization(
+    out_dir, company, role, requirements, coverage, gap_threshold=0.3
+):
+    """One bar per requirement, coloured by kind, with the gap threshold marked."""
+    out_path = out_dir / "match_viz.png"
+    if not requirements:
+        fig, ax = plt.subplots(figsize=(6, 2))
+        ax.text(0.5, 0.5, "no requirements parsed", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        return out_path
+
+    ordered = sorted(
+        requirements,
+        key=lambda r: (float(coverage.get(r.id, 0.0)), r.id),
+    )
+    labels = [f"{r.id}  {_truncate(r.text, 58)}" for r in ordered]
+    values = [float(coverage.get(r.id, 0.0)) for r in ordered]
+    colors = [KIND_COLORS.get(r.kind, "#9CA3AF") for r in ordered]
+
+    height = max(3.0, 0.28 * len(ordered) + 1.4)
+    fig, ax = plt.subplots(figsize=(12, height))
+    ax.barh(labels, values, color=colors, edgecolor="white", linewidth=0.5)
+    ax.axvline(x=gap_threshold, color=THRESH_COLOR, linestyle="--", linewidth=1,
+               alpha=0.8, label=f"gap threshold ({gap_threshold:.2f})")
+    ax.set_xlabel("coverage (soft-pooled best match over the selected claims)", fontsize=9)
+    ax.set_title(f"Requirement coverage: {company} – {role}",
+                 fontsize=13, fontweight="bold")
+    ax.set_xlim(0, max(1.0, max(values) * 1.1))
+    ax.tick_params(axis="y", labelsize=7)
+    ax.legend(
+        handles=[Patch(facecolor=color, label=kind) for kind, color in KIND_COLORS.items()]
+        + [Patch(facecolor=THRESH_COLOR, label=f"threshold {gap_threshold:.2f}")],
+        loc="lower right", fontsize=8, framealpha=0.9,
+    )
+    fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return out_path
