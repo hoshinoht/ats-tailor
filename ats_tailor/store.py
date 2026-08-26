@@ -241,7 +241,15 @@ class Store:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path))
+        # ``check_same_thread=False`` because a server front-end runs its
+        # handlers on a worker thread pool and a connection would otherwise be
+        # bound to whichever thread happened to open it. SQLite is built here
+        # in multi-thread mode (``sqlite3.threadsafety == 1``), which allows a
+        # connection to move between threads but not to be used by two at
+        # once — so every caller that has threads must serialise its own
+        # access. ``ats_tailor.mcp`` does, with one lock around every tool
+        # call; the CLI and the pipeline have one thread and nothing to do.
+        self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")

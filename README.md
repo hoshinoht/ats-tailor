@@ -37,6 +37,10 @@ ats-tailor <command> [options]
 | `override <out_dir> …` | Edit the per-run `overrides.yaml` next to a run's output; `--show` prints it. |
 | `runs list\|show\|status\|note\|quiet` | The application tracker. A `⚠` in the first column means the posting's gates said something. |
 | `jd show <jd> [--provider …] [--edit]` | Read a posting into gates and weighted requirements and print them, before any run. `--edit` opens the profile in `$EDITOR` and stores it as the edited one, which outranks every later extraction. |
+| `jd add [file] --company --role [--source-url]` | Store a pasted posting as `jd/<slug>.txt`, sanitised: HTML comments, `<script>`/`<style>` blocks, tags, invisible characters and blank-line runs are stripped and counted. Reads stdin without a file. The URL is recorded as text and never fetched. |
+| `fit <slug> [--json]` | Cheap triage before a run: the hard gates, the best requirement coverage the index could reach, the claims carrying it, and the terms nothing covers. No selection, no LaTeX, no PDF. |
+| `review-pack <run> [--json]` | One run's posting, gates, requirements, selected claims and coverage table in one payload — what a reviewing agent reads. |
+| `mcp --repo DIR [--provider …] [--allow-eval]` | Serve the repository to an agent runtime over stdio (Model Context Protocol). Silent while idle. `--allow-eval` additionally exposes the scoring sweep. |
 
 `python -m ats_tailor.tailor …` remains supported and is unchanged.
 
@@ -267,6 +271,173 @@ This whole section is about `--engine v1`. The v2 engine does not expand
 keywords: putting invented terms in front of the requirement parser would tier
 and weight text the posting never contained. See **Providers** above for what
 `--llm` does there.
+
+## Service and MCP
+
+Every front-end goes through one in-process API, `ats_tailor.service.Service`.
+The CLI, the MCP server and (next) the TUI are adapters: they parse arguments,
+format output, and in between call one method. Nothing above that line knows
+about SQLite, ruamel, latexmk or the solver.
+
+```python
+from ats_tailor.service import Service, OverridesPatch
+
+with Service("~/projects/personal/resume") as service:
+    report = service.fit("cpf")                       # gates + coverage ceiling
+    run = service.tailor("cpf", "CPF Board", "SRE Intern")
+    service.override(run.run_id, OverridesPatch(pin_items=["carehaven"]))
+    service.set_status(run.run_id, "applied", "sent by email")
+```
+
+`Service(repo_root, *, index_dir=…, jd_dir=…, labels_dir=…, output_dir=…,
+eval_dir=…, data_dir=…, profile_path=…, provider=…)` resolves the conventional
+layout under `repo_root`, each directory overridable. The index and the store
+load on first use, so constructing one opens nothing and imports no model.
+Every method returns a pydantic model and raises `ServiceError(code, message,
+details)` with `code` in `invalid_input`, `not_found`, `validation_failed`,
+`compile_failed`, `provider_unavailable`, `conflict`, `not_implemented`. No
+method prints: the pipeline runs quiet and everything it would have said comes
+back in `RunSummary.warnings`.
+
+### MCP server
+
+```bash
+ats-tailor mcp --repo ~/projects/personal/resume
+```
+
+Stdio, nineteen tools (twenty with `--allow-eval`), the conventions of
+`gofetch-mcp` / `researcher-mcp`:
+`snake_case` names, `{"ok": true, …}` or `{"ok": false, "error": {"code",
+"message"}}` (nothing ever raises to the client), `max_chars`/`offset`
+pagination answering with `total_chars`/`truncated`/`next_offset`, a
+healthcheck, and silence at idle.
+
+| Tool | What it does |
+| ---- | ------------ |
+| `ats_healthcheck` | Is this repo usable — index, store, postings, whether `latexmk`/`pdftotext` are installed. Call it first. |
+| `ats_list_jds` | Every posting in `jd/` with its slug, company/role, gate summary, deadline and run count. |
+| `ats_add_jd(text, company, role, source_url?)` | Store a pasted posting, sanitised, and report what was stripped. Never fetches a URL. |
+| `ats_fit(slug)` | Triage: gates, `must_upper_bound`, strengths, gaps, uncovered must-haves. No run. |
+| `ats_extract_requirements(slug, provider?, reextract?)` | The posting as gates + weighted requirements. With provider `none`/`external` it also returns the posting (trust-wrapped) and the profile JSON schema, so the driving agent can do the extraction. |
+| `ats_set_requirements(slug, profile_json)` | Store the agent's reading; it outranks every later extraction. Pydantic-validated, provenance `agent`. |
+| `ats_tailor(slug, company?, role?, check?, provider?, out_dir?, record?, engine?)` | Select, render, fit to one page, check, record. `check` defaults to true; `out_dir` defaults to `output/<company>-<role>` and must be inside the repository. |
+| `ats_get_run(run_id, section?, max_chars?, offset?)` | One part of a run: `summary`, `selection`, `trace`, `coverage`, `check`, `report`, `tex`. The last three paginate. |
+| `ats_override(run_id, pin_items?, exclude_items?, pin_bullets?, exclude_bullets?, bullet_text?, summary?, budget_lines?)` | Edit `overrides.yaml` and re-run into the same directory. |
+| `ats_compile(run_id)` | Compile to PDF; records the file's sha256 on the run. |
+| `ats_check(run_id, labels?)` | ATS parse check + the four-state keyword table. |
+| `ats_review_pack(run_id, max_chars?, offset?)` | Posting, gates, requirements, selected claims and coverage in one payload, for a reviewer sub-agent. |
+| `ats_index_get(kind, id)` | One entity: `project`, `role`, `skill`, `certification`, `summaries`, `education`. |
+| `ats_index_put(kind, id, patch_json)` | Write a fact back. Bullets merge by id; the whole index is re-validated first; the YAML round-trips with its comments. |
+| `ats_index_validate` | Fatal errors and author's-call warnings. |
+| `ats_runs(status?, company?)` | The tracker table. |
+| `ats_outcome(run_id, status, note?)` | Record what happened. Never inferred. |
+| `ats_followups(days?)` | Open applications quiet for `days` days. |
+| `ats_eval(engine?, provider?, only?)` | The full scoring sweep over the labels. Slow. **Only registered with `--allow-eval`** — see below. |
+| `ats_propose_variant` | Phase 5; returns `not_implemented`. |
+
+Conduct rules, enforced in code and tested:
+
+- **A posting is untrusted data.** JD text is only ever returned inside
+  `<posting untrusted="true">…</posting>` behind a preamble saying it is data,
+  not instructions. `ats_add_jd` strips markup, `<script>`/`<style>` bodies and
+  invisible characters — zero-width joiners, bidi marks, the BOM, and the
+  Unicode tag block a prompt injection hides in — and reports the counts.
+- **Every id is validated** against `^[a-z0-9._-]+$` and resolved inside the
+  repo; paths in results are repo-relative.
+- **The server never fetches a URL** and shells out to nothing but
+  `latexmk`, `pdftotext` and `pdfinfo`.
+- **Every write is schema-checked.** `ats_set_requirements` and
+  `ats_index_put` go through pydantic; a failure comes back as
+  `validation_failed` with the field-by-field errors and nothing is written.
+- **Gaps are reported, never filled.** Nothing reaches a page that is not an
+  index claim by id.
+
+`--provider` decides who reads a posting when a tool does not say. The default
+is `none`: the deterministic parser needs nothing running, and the premise of
+the MCP is that the driving agent is the model, through
+`ats_extract_requirements` → `ats_set_requirements`.
+
+`--allow-eval` adds `ats_eval` to the server. Without it the tool is **absent**
+from `list_tools` — not a stub that refuses. The sweep is minutes of CPU, it
+writes into `eval/`, and nothing can cancel it once it has started; an agent
+that can see it will eventually spend it answering a question one `ats_fit`
+would have answered. Run it from the shell (`ats-tailor eval`) unless a session
+is genuinely about measuring a scoring change.
+
+#### OpenCode
+
+```json
+{
+  "mcp": {
+    "ats-tailor": {
+      "type": "local",
+      "command": ["sh", "-c", "uv run --project $HOME/projects/personal/resume/ats-tailor ats-tailor mcp --repo $HOME/projects/personal/resume"],
+      "enabled": true
+    }
+  }
+}
+```
+
+#### Claude Code
+
+```bash
+claude mcp add ats-tailor -- uv run --project $HOME/projects/personal/resume/ats-tailor ats-tailor mcp --repo $HOME/projects/personal/resume
+```
+
+An `AGENTS.md` at the resume repo root is the thin pointer both runtimes read:
+what the repo is, where the MCP is, and the honesty rules.
+
+### The same three things from the shell
+
+```bash
+pbpaste | ats-tailor jd add --company "CPF Board" --role "SRE Intern" \
+                            --source-url https://careers.example/123
+ats-tailor fit cpf
+ats-tailor review-pack output/cpf-sre-intern
+```
+
+`jd add` writes `jd/<company>-<role>.txt` — never over an existing file; a
+collision takes a `-2` suffix — and says what it stripped:
+
+```
+wrote jd/cpf-board-sre-intern.txt  (4211 chars, 8f31a0c4e2b7)
+  sanitised: 3 html tags; 1 invisible chars (58 chars)
+  next:      ats-tailor fit cpf-board-sre-intern
+```
+
+`fit` answers the only question worth asking before an afternoon of tailoring —
+*can this index cover this posting at all?*
+
+```
+cpf
+  title       Site Reliability Engineer Intern
+  archetype   DevOps & Tooling
+
+gates
+  eligibility  PASS     no citizenship or clearance clause found
+  language     PASS     no language beyond the posting's own
+  location     PASS     no relocation or on-site clause found
+  deadline     UNKNOWN  no closing date stated
+  seniority    PASS     no seniority bar found
+
+ceiling     must 74%  nice -  (4 must / 25 requirements)
+
+strengths
+  razer-swe: razer-swe.b3 (1.97)
+  virtualkopis: virtualkopis.r2 (1.48)
+  forest-link-protocol: forest-link-protocol.r3 (1.06)
+
+terms not in the index (5)
+  Reliability, CPF, Azure, AKS, Terraform
+```
+
+The ceiling credits every must-have requirement with its single best-matching
+claim and ignores the page budget, the redundancy penalty, and everything else
+that makes a real run worse than its best case. A low ceiling is a fact about
+the index, not about the selection: no amount of tailoring fixes it, and the
+listed gaps are the evidence that is missing. Requirements naming nothing at
+all ("works well in a team") are excluded from the average — every claim
+answers them about equally well, so their ceiling measures the encoder.
 
 ## Output
 

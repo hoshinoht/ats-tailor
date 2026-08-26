@@ -18,6 +18,7 @@ dependencies = [
     "numpy",
     "jinja2",
     "matplotlib",
+    "mcp>=2,<3",
 ]
 
 [project.optional-dependencies]

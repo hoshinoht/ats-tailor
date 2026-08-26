@@ -12,7 +12,10 @@ Subcommands:
 - ``sync``     — bring the runtime store in line with the index
 - ``override`` — edit a run's ``overrides.yaml``
 - ``runs``     — the application tracker
-- ``jd``       — read a posting into gates and requirements, and edit them
+- ``jd``       — read a posting into gates and requirements, add and edit them
+- ``fit``      — cheap triage of a posting against the index, before a run
+- ``review-pack`` — one run's posting, choices and coverage, for a reviewer
+- ``mcp``      — serve this repository to an agent runtime over stdio
 """
 
 from __future__ import annotations
@@ -37,8 +40,199 @@ commands:
   sync      update the runtime store from the index (--embed to pre-embed)
   override  edit the per-run overrides.yaml next to a run's output
   runs      application tracker (runs list | show | status | note | quiet)
-  jd        inspect a posting's gates and requirements (jd show)
+  jd        inspect a posting's gates and requirements (jd show | jd add)
+  fit       triage a posting against the index without running the pipeline
+  review-pack  one run's posting, selected claims and coverage, in one payload
+  mcp       serve this repository to an agent runtime over stdio (MCP)
 """
+
+
+def _service(args):
+    """The :class:`Service` for a command's ``--repo`` and directory flags."""
+    from .service import Service
+
+    repo = Path(getattr(args, "repo", None) or ".").expanduser().resolve()
+    index = getattr(args, "index", None)
+    return Service(
+        repo,
+        index_dir=Path(index).resolve() if index else None,
+        data_dir=getattr(args, "data_dir", None),
+        provider=getattr(args, "provider", None),
+    )
+
+
+def _service_error(exc) -> int:
+    print(f"error [{exc.code}]: {exc.message}", file=sys.stderr)
+    for detail in (exc.details or []) if isinstance(exc.details, list) else []:
+        print(f"  - {detail}", file=sys.stderr)
+    return 1
+
+
+def _cmd_mcp(argv: list[str]) -> int:
+    """Serve one repository over stdio. Silent unless a client says something."""
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor mcp",
+        description="Serve this resume repository to an agent runtime over stdio "
+                    "(Model Context Protocol). No output is expected while idle; "
+                    "the process waits for MCP client traffic on stdin.")
+    parser.add_argument("--repo", default=".",
+                        help="repository root holding index/, jd/, output/ (default: .)")
+    parser.add_argument("--index", default=None,
+                        help="index directory (default: <repo>/index)")
+    parser.add_argument("--data-dir", default=None,
+                        help="runtime store directory (default: <repo>/data)")
+    parser.add_argument("--provider", default="none", choices=list(config.PROVIDERS),
+                        help="who reads a posting when a tool does not say "
+                             "(default: none — the driving agent is the model, "
+                             "through ats_extract_requirements)")
+    parser.add_argument("--allow-eval", action="store_true",
+                        help="also expose ats_eval, the full scoring sweep over "
+                             "every label (minutes of CPU, writes into eval/, "
+                             "cannot be cancelled once started). Without this "
+                             "the tool is absent from the server, not refusing")
+    args = parser.parse_args(argv)
+
+    from .mcp import run_stdio
+
+    return run_stdio(args.repo, provider=args.provider,
+                     index_dir=args.index, data_dir=args.data_dir,
+                     allow_eval=args.allow_eval)
+
+
+def _cmd_fit(argv: list[str]) -> int:
+    """Gates and the best coverage the index could reach, before any run."""
+    import json
+
+    from .service import ServiceError
+
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor fit",
+        description="Triage a posting against the index: the hard gates, the "
+                    "requirement coverage the index could reach at best, the "
+                    "claims carrying it, and the terms nothing covers. No "
+                    "selection, no LaTeX, no PDF.")
+    parser.add_argument("jd", help="posting slug, or a path to a file in jd/")
+    parser.add_argument("--repo", default=".", help="repository root (default: .)")
+    parser.add_argument("--index", default=None, help="index directory")
+    parser.add_argument("--data-dir", default=None, help="store directory")
+    parser.add_argument("--json", action="store_true", help="print the report as JSON")
+    args = parser.parse_args(argv)
+
+    service = _service(args)
+    try:
+        report = service.fit(_jd_slug(args.jd))
+    except ServiceError as exc:
+        return _service_error(exc)
+    finally:
+        service.close()
+
+    if args.json:
+        print(json.dumps(report.model_dump(mode="json"), indent=2))
+        return 0
+    # A blocking gate is news, not an error: whether to apply anyway is the
+    # user's call, so it is printed and the command still succeeds.
+    print(_render_fit(report))
+    return 0
+
+
+def _jd_slug(value: str) -> str:
+    """``cpf``, ``jd/cpf.txt`` and ``./jd/cpf.txt`` all name the same posting."""
+    text = str(value).strip()
+    return Path(text).stem if ("/" in text or text.endswith(".txt")) else text
+
+
+def _render_fit(report) -> str:
+    def pct(value):
+        return "-" if value is None else f"{value:.0%}"
+
+    lines = [
+        f"{report.slug}",
+        f"  title       {report.title or '-'}",
+        f"  archetype   {report.archetype or '-'}",
+        "",
+        "gates",
+    ]
+    for name, gate in (report.gates or {}).items():
+        detail = gate.get("note") or gate.get("quote") or ""
+        date = f"[{gate['date']}] " if gate.get("date") else ""
+        lines.append(f"  {name:<12} {str(gate.get('verdict', '?')).upper():<8} {date}{detail}")
+    lines += [
+        "",
+        f"ceiling     must {pct(report.must_upper_bound)}  "
+        f"nice {pct(report.nice_upper_bound)}  "
+        f"({report.must_requirements} must / {report.requirements} requirements)",
+        "",
+        "strengths",
+    ]
+    lines += [f"  {line}" for line in report.strengths] or ["  (none)"]
+    if report.uncovered:
+        lines += ["", "nothing answers"]
+        lines += [f"  {text[:96]}" for text in report.uncovered]
+    if report.gaps:
+        lines += ["", f"terms not in the index ({len(report.gaps)})",
+                  "  " + ", ".join(report.gaps)]
+    return "\n".join(lines)
+
+
+def _cmd_review_pack(argv: list[str]) -> int:
+    """One run's posting, choices and coverage — the payload a reviewer reads."""
+    import json
+
+    from .service import ServiceError
+
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor review-pack",
+        description="Everything needed to review one run: the posting, the "
+                    "gates, the requirements, the claims that were selected "
+                    "and what each covers, the coverage table, and the gaps.")
+    parser.add_argument("run", help="run id, or the run's output directory")
+    parser.add_argument("--repo", default=".", help="repository root (default: .)")
+    parser.add_argument("--index", default=None, help="index directory")
+    parser.add_argument("--data-dir", default=None, help="store directory")
+    parser.add_argument("--json", action="store_true", help="print the pack as JSON")
+    parser.add_argument("--no-jd", action="store_true",
+                        help="leave the posting out of the JSON")
+    args = parser.parse_args(argv)
+
+    service = _service(args)
+    try:
+        pack = service.review_pack(args.run)
+    except ServiceError as exc:
+        return _service_error(exc)
+    finally:
+        service.close()
+
+    if args.json:
+        payload = pack.model_dump(mode="json")
+        if args.no_jd:
+            payload.pop("jd_text", None)
+        else:
+            from .mcp import wrap_posting
+
+            payload["jd_text"] = wrap_posting(payload["jd_text"])
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    lines = [
+        f"{pack.run_id}  {pack.company}/{pack.role}",
+        f"  out_dir     {pack.out_dir}",
+        "",
+        "selected claims",
+    ]
+    for claim in pack.selected_claims:
+        lines.append(f"  {claim.bullet_id:<24} [{claim.item}] covers "
+                     f"{', '.join(claim.covers) or '-'}")
+        lines.append(f"    {claim.text}")
+    lines += ["", "coverage (worst first)"]
+    for row in pack.coverage_table[:12]:
+        lines.append(f"  {str(row['id']):<12} {str(row['kind'] or ''):<14} "
+                     f"{float(row['coverage']):.2f}  {str(row['text'] or '')[:64]}")
+    if pack.gaps:
+        lines += ["", f"terms not in the index ({len(pack.gaps)})",
+                  "  " + ", ".join(pack.gaps)]
+    print("\n".join(lines))
+    return 0
+
 
 
 def _cmd_tailor(argv: list[str]) -> int:
@@ -326,8 +520,21 @@ def _cmd_jd(argv: list[str]) -> int:
 
     parser = argparse.ArgumentParser(
         prog="ats-tailor jd",
-        description="Read a job description into gates and weighted requirements.")
+        description="Add a job description to the repository, or read one into "
+                    "gates and weighted requirements.")
     sub = parser.add_subparsers(dest="action", required=True)
+
+    add = sub.add_parser(
+        "add", help="store a posting as jd/<slug>.txt, sanitised")
+    add.add_argument("file", nargs="?", default=None,
+                     help="file holding the posting (default: read stdin)")
+    add.add_argument("--company", required=True)
+    add.add_argument("--role", required=True)
+    add.add_argument("--source-url", default=None,
+                     help="where it came from; recorded as text and never fetched")
+    add.add_argument("--repo", default=".", help="repository root (default: .)")
+    add.add_argument("--data-dir", default=None, help="store directory")
+
     show = sub.add_parser("show", help="print a posting's profile")
     show.add_argument("jd", help="job description text file")
     show.add_argument("--index", default="index", help="index directory (default: index/)")
@@ -345,6 +552,8 @@ def _cmd_jd(argv: list[str]) -> int:
     show.add_argument("--edit", action="store_true",
                       help="open the profile in $EDITOR and save it as the edited one")
     args = parser.parse_args(argv)
+    if args.action == "add":
+        return _jd_add(args)
 
     jd_path = Path(args.jd)
     if not jd_path.is_file():
@@ -411,6 +620,41 @@ def _cmd_jd(argv: list[str]) -> int:
         return 0
     finally:
         store.close()
+
+
+def _jd_add(args) -> int:
+    """``jd add``: store a pasted posting, and say what was stripped out of it."""
+    from .service import ServiceError
+
+    if args.file:
+        path = Path(args.file)
+        if not path.is_file():
+            print(f"error: no such file: {path}", file=sys.stderr)
+            return 1
+        text = path.read_text(errors="replace")
+    elif not sys.stdin.isatty():
+        text = sys.stdin.read()
+    else:
+        print("error: give a file or pipe the posting on stdin", file=sys.stderr)
+        return 1
+
+    args.index = None
+    service = _service(args)
+    try:
+        info = service.add_jd(text, args.company, args.role, args.source_url)
+    except ServiceError as exc:
+        return _service_error(exc)
+    finally:
+        service.close()
+
+    print(f"wrote {info.path}  ({info.chars} chars, {info.jd_hash[:12]})")
+    if info.sanitised and not info.sanitised.empty():
+        print(f"  sanitised: {info.sanitised.summary_line()} "
+              f"({info.sanitised.chars_removed} chars)")
+    if info.source_url:
+        print(f"  source:    {info.source_url} (recorded, never fetched)")
+    print(f"  next:      ats-tailor fit {info.slug}")
+    return 0
 
 
 def _render_jd_profile(profile, jd_path) -> str:
@@ -717,6 +961,9 @@ def _cmd_eval(argv: list[str]) -> int:
 
 COMMANDS = {
     "tailor": _cmd_tailor,
+    "fit": _cmd_fit,
+    "review-pack": _cmd_review_pack,
+    "mcp": _cmd_mcp,
     "sync": _cmd_sync,
     "override": _cmd_override,
     "runs": _cmd_runs,

@@ -295,6 +295,23 @@ ats_tailor/service.py   one in-process typed API: run, override, compile,
    └─ http/             FastAPI adapter — optional, only for remote clients
 ```
 
+`service.py` and `mcp/` landed in 4a; `tui/` is 4b and `http/` is still
+optional. Three properties of the service are load-bearing for every adapter
+after it:
+
+- **It never prints.** The pipeline is driven with `quiet=True` and everything
+  it would have said comes back in `RunSummary.warnings`. A front-end speaking
+  a protocol over stdout cannot survive a library that logs to it, and the MCP
+  additionally redirects `sys.stdout` to stderr for the duration of every call
+  because `sentence-transformers` and `latexmk` print regardless.
+- **One error type.** `ServiceError(code, message, details)` with a code from a
+  closed set, so an adapter maps errors once instead of catching `ValueError`,
+  `KeyError`, `FileNotFoundError` and `ValidationError` at every call site.
+- **Nothing is eager.** The index and the store load on first use, so
+  constructing a `Service` opens no file and imports no model — which is what
+  makes `ats_healthcheck` able to answer "this index does not load" instead of
+  failing to start.
+
 **LLM provider interface** (`ats_tailor/llm/provider.py`): `extract(jd)`,
 `rerank(requirement, claims)`, `propose_variant(bullet, archetype)`.
 Providers: `ollama`, `lmstudio`, `mlx`, `none` (deterministic fallbacks),
@@ -310,11 +327,12 @@ terminal supports it), Index (tree + form, live validation, round-trip
 save), Eval (table + compare). `textual serve` exposes the same app in a
 browser — no separate web front-end.
 
-**MCP (OpenCode/Claude Code compatible).** Same conventions as
+**MCP (OpenCode/Claude Code compatible).** *Delivered in 4a
+(`ats_tailor/mcp/`).* Same conventions as
 `gofetch-mcp` / `researcher-mcp`: stdio, snake_case tools, structured
 `error{code,message}` (`invalid_input`, `not_found`, `validation_failed`,
-`compile_failed`), `ats_healthcheck`, `max_chars`/`offset` pagination,
-silent at idle. Tools:
+`compile_failed`, `provider_unavailable`, `conflict`, `not_implemented`),
+`ats_healthcheck`, `max_chars`/`offset` pagination, silent at idle. Tools:
 `ats_healthcheck`, `ats_list_jds`, `ats_add_jd`, `ats_extract_requirements`,
 `ats_set_requirements`, `ats_tailor`, `ats_get_run`, `ats_override`,
 `ats_compile`, `ats_index_get`, `ats_index_put`, `ats_propose_variant`,
@@ -370,7 +388,8 @@ compose run --rm -it app ats-tailor tui` for the TUI, `ats-tailor serve`
 | 3a | **Delivered.** `ats-match` core (types, BM25, RRF, greedy selection, metrics) in a uv workspace; adapter index→claims; deterministic requirement parser; v2 pipeline with compile loop behind `--engine v2`; eval parity with v1 | 1, 2 |
 | 3b | **Delivered.** SQLite runtime store (`entities`, `embeddings`, `jd_profiles`, `runs`, `run_notes`), `sync`, per-run `overrides.yaml` honoured by selection (pins/excludes/edited text/requirement edits), run records and the tracker, `labels from-run` | 3a |
 | 3c | **Delivered.** LLM provider interface (`ollama|lmstudio|mlx|none|external`), requirement extraction + gates, alias-aligned surface forms in rendering, summary variants + target title, v2 becomes the default engine | 3b |
-| 4 | `service.py`, LLM provider interface, Textual TUI, MCP server, Dockerfile/Compose | 3 |
+| 4a | **Delivered.** `service.py` (the one in-process API), stdio MCP server (19 tools by default, 20 with `--allow-eval`), `fit` / `jd add` / `review-pack` CLI commands, `AGENTS.md` | 3 |
+| 4b | Textual TUI, `textual serve`, Dockerfile/Compose | 4a |
 | 5 | Variant proposals + summary polish with metric guardrail (agent via MCP or local model), approval in TUI | 4 |
 
 ### 3a result (2026-08-26)
@@ -589,3 +608,88 @@ off the gap list, even though no index claim carries it. The sentence is honest
 — it says what the application is *for*, not what was done — but the gap report
 is quieter than it was. Phase 4 should either exclude the target statement's own
 words from the coverage tally or keep listing them as gaps.
+
+### 4a result (2026-08-26)
+
+`ats_tailor/service.py` (one API, ~1900 lines) and `ats_tailor/mcp/`
+(twenty tools over it, nineteen served by default, ~890 lines), plus
+`ats-tailor fit | jd add | review-pack | mcp` and the parent repo's
+`AGENTS.md`. 46 new tests; the suite is 322 passing with `ATS_SMOKE=1`.
+
+Nothing in `pipeline.py`, `adapt.py`, `select.py`, `evaluate.py` or the
+renderer was touched, so the v2 baseline (`eval/30a5cd1d5a71.json`) still
+stands by construction. Outside the new files the diff is three things: one
+line of `store.py` (`check_same_thread=False`, below), four new `cli.py`
+commands, and `mcp` in `pyproject.toml`.
+
+Six things had to be decided rather than assumed:
+
+- **A stray `print` is a dead MCP session.** The check in `tailor.py` prints
+  unconditionally, so the service grew a silent twin of it rather than a `say=`
+  parameter threaded through the pipeline: the point was to leave the pipeline
+  byte-identical, and "the library does not print" is a better invariant than
+  "the library prints unless asked not to". The tool wrapper redirects stdout
+  to stderr anyway, because the model loader and `latexmk` are not ours.
+- **The SDK runs sync handlers on a thread pool.** This build of SQLite is in
+  multi-thread mode (`sqlite3.threadsafety == 1`): a connection may move
+  between threads but never be used by two at once. The store now opens with
+  `check_same_thread=False` and the MCP holds one lock around every tool call —
+  which also means two `ats_tailor` calls cannot race into one output
+  directory. The alternative, a connection per thread, would have made
+  "close the store" unanswerable.
+- **An edit outranks extraction, whichever reader would have run.** The
+  extraction cache is keyed on `(jd_hash, provider, prompt_version)`, so an
+  edit stored under `external` is invisible to a `--provider none` run. A
+  correction is a statement about the posting, not about which model would
+  otherwise have read it, so `set_requirements` writes the deterministic row
+  *and* the service's own provider row.
+- **`fit`'s ceiling excludes requirements that name nothing.** "Works well
+  independently" is answered about equally well by every claim in any index, so
+  including it measures the encoder rather than the evidence. Those
+  requirements are still counted and still reported; they are not averaged.
+  On `jd/cpf.txt` the real index reaches `must_upper_bound` 0.74 over 4 hard
+  must-haves out of 25 requirements, with `Reliability, CPF, Azure, AKS,
+  Terraform` as terms no claim carries.
+- **`index_put` creates as well as edits.** The honesty rule in §2 is that a
+  fact stated in conversation is written back in the same session; a writer
+  that could only ever edit an existing entity would fail on the first new job.
+  Creation goes through the same whole-index validation, so a half-specified
+  entity is a `validation_failed` with the missing fields named and nothing on
+  disk.
+- **Provenance is a YAML comment, not a field.** `# added 2026-08-26 via mcp`
+  beside a new bullet's id is for the human reading the pull request. As a
+  schema field it would reach the store, the report, the legacy projection and
+  every JSON payload, for no reader's benefit.
+
+Deviations from `docs/plans/phase-4a.md`, all deliberate:
+
+- **`mcp.server.mcpserver.MCPServer`, not `mcp.server.fastmcp.FastMCP`.** The
+  current SDK is 2.x, where `FastMCP` was renamed; importing the old path
+  raises with a migration message. The alternative was pinning `mcp<2` to
+  match the plan's spelling, which is a worse trade than one renamed class.
+- **`Service` takes an override for every directory, not just two.** Tests
+  need a whole repository in `tmp_path`, and a service that can only relocate
+  `index/` and `data/` would have written runs into the real `output/`.
+- **`add_jd` records company, role and source URL in `data/jd_meta.json`.**
+  The posting file holds the posting; a URL written into it would change the
+  text that gets hashed and extracted. A gitignored sidecar beside the store
+  is derived data, which is what it is. No new SQL table: a schema migration
+  for four strings is not worth an upgrade path.
+- **`fit` also returns `uncovered` and `blocking_gates`.** The plan's
+  `strengths` and `gaps` say what the index has and what it lacks; neither
+  says which must-have nothing answers, which is the one a person acts on.
+- **`ats_get_run` has JSON sections as well as text ones.** `summary`,
+  `selection`, `coverage` and `check` are bounded and are returned whole;
+  only `report`, `tex` and `trace` paginate.
+- **`ats_tailor` takes named parameters, not the plan's `options` object.**
+  A free-form object gives an agent no schema to read; `check`, `provider`,
+  `out_dir`, `record` and `engine` are arguments with types and defaults, and
+  `out_dir` is additionally checked to resolve inside the repository — it is
+  the one argument that could otherwise write a rendered resume anywhere on
+  the disk.
+- **`ats_eval` is gated behind `ats-tailor mcp --allow-eval`.** The plan lists
+  it in the tool set; a plain server does not register it. It is minutes of
+  CPU, it writes into `eval/`, and nothing cancels it once it has started, so
+  an agent that can see it will eventually spend it answering a question one
+  `ats_fit` would have answered. Absent beats present-and-refusing: a tool
+  that is not in `list_tools` is not a tool anybody has to reason about.
