@@ -14,6 +14,19 @@
 \pagestyle{empty}
 \setlength{\parindent}{0pt}
 \raggedright
+
+% Entry header: the title wraps inside its own box, so the date can never be
+% pushed onto a later line (an ATS reads that as a range missing its end).
+% The row is set to \textwidth explicitly: a trailing \\ (project headers have
+% one, for the Technologies line) ends the line without stretching \hfill, which
+% would otherwise leave the project dates short of the right margin.
+\newcommand{\entryhead}[2]{%
+  \noindent\hbox to \textwidth{%
+    \begin{minipage}[t]{0.78\textwidth}\raggedright #1\end{minipage}%
+    \hfill
+    \begin{minipage}[t]{0.20\textwidth}\raggedleft #2\end{minipage}%
+  }%
+}
 \titleformat{\section}{\large\bfseries}{}{0em}{\MakeUppercase}
 \titlespacing*{\section}{0pt}{7pt}{3pt}
 \setlist[itemize]{nosep,left=0pt,label=\textbullet,topsep=1pt,itemsep=1pt}
@@ -28,7 +41,7 @@ Email: \href{mailto:((( profile.email | latex_href_escape )))}{((( profile.email
 ((* if summary *))
 
 % ── SUMMARY ──
-\section{Professional Summary}
+\section{Summary}
 ((( summary.summary | latex_escape )))((*- if summary.highlights *)) ((* for h in summary.highlights *))\enspace\textbullet\enspace ((( h | latex_escape )))((*- endfor *))((*- endif *))
 ((* endif *))
 
@@ -37,7 +50,7 @@ Email: \href{mailto:((( profile.email | latex_href_escape )))}{((( profile.email
 ((* for edu in education -*))
 ((*- if not loop.first *))\\[4pt]
 ((* endif -*))
-\textbf{((( edu.degree | latex_escape ))) in ((( edu.field | latex_escape )))} \hfill ((( edu.period | latex_escape )))\\
+\entryhead{\textbf{((( edu.degree | latex_escape ))) in ((( edu.field | latex_escape )))}}{((( edu.period | latex_escape )))}\\
 ((( edu.institution | latex_escape )))
 ((* endfor *))
 
@@ -47,7 +60,7 @@ Email: \href{mailto:((( profile.email | latex_href_escape )))}{((( profile.email
 ((*- if not loop.first *))
 
 ((* endif -*))
-\textbf{((( role.title | latex_escape )))} -- ((( role.company | latex_escape ))) \hfill ((( role.period | latex_escape )))
+\entryhead{\textbf{((( role.title | latex_escape )))} -- ((( role.company | latex_escape )))}{((( role.period | latex_escape )))}
 \begin{itemize}((* for bullet in role.bullets *))
   \item ((( bullet | latex_escape )))
 ((*- endfor *))
@@ -60,7 +73,7 @@ Email: \href{mailto:((( profile.email | latex_href_escape )))}{((( profile.email
 ((*- if not loop.first *))
 
 ((* endif -*))
-\textbf{((( proj.name | latex_escape )))} -- ((( proj.tagline | latex_escape ))) \hfill ((( proj.period | latex_escape )))\\
+\entryhead{\textbf{((( proj.name | latex_escape )))} -- ((( proj.tagline | latex_escape )))}{((( proj.period | latex_escape )))}\\
 \textit{Technologies: ((( proj.tech_line | latex_escape )))}
 \begin{itemize}((* for bullet in proj.bullets *))
   \item ((( bullet | latex_escape )))

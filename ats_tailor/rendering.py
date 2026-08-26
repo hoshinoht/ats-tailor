@@ -104,8 +104,17 @@ def build_role_context(role):
     }
 
 
-def render_resume(company, role, profile, education, experience, projects, skill_lines, certifications, summary=None):
-    """Render the LaTeX resume from the Jinja2 template."""
+def render_resume(company, role, profile, education, experience, projects, skill_lines,
+                  certifications, summary=None, target_title=None):
+    """Render the LaTeX resume from the Jinja2 template.
+
+    ``target_title`` appends an honest target statement to the summary
+    (``Targeting: <title>.``), which is how the JD's job title earns its one
+    appearance on the page — see ``docs/v2-design.md`` §2.
+    """
+    if target_title and summary and summary.get("summary"):
+        summary = {**summary,
+                   "summary": f"{summary['summary'].rstrip()} Targeting: {target_title}."}
     env = Environment(
         loader=FileSystemLoader(str(PKG_DIR)),
         block_start_string="((*",

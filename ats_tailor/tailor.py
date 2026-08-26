@@ -11,9 +11,12 @@ Usage:
 
 from sentence_transformers import SentenceTransformer
 import argparse
+import json
 import math
 import re
 import sys
+from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from .scoring import (
@@ -76,10 +79,57 @@ def _safe_slug(*parts):
     return slug or "resume"
 
 
+@dataclass
+class RunResult:
+    """What one pipeline run produced, for callers that need it in-process.
+
+    ``role_ids``/``project_ids`` are in *score* order (the order selection
+    ranked them), not the chronological order the page renders, so evaluation
+    can measure ranking quality. ``entries`` is what ``atscheck.parse_check``
+    needs to verify each rendered entry's date line.
+    """
+
+    out_dir: Path
+    tex_path: Path
+    company: str
+    role: str
+    role_ids: list[str] = field(default_factory=list)
+    project_ids: list[str] = field(default_factory=list)
+    cert_ids: list[str] = field(default_factory=list)
+    skill_lines: list[dict] = field(default_factory=list)
+    entries: list[dict] = field(default_factory=list)
+
+    def to_dict(self):
+        return {
+            "company": self.company,
+            "role": self.role,
+            "out_dir": str(self.out_dir),
+            "tex": self.tex_path.name,
+            "roles": self.role_ids,
+            "projects": self.project_ids,
+            "certifications": self.cert_ids,
+            "skill_lines": self.skill_lines,
+            "entries": self.entries,
+        }
+
+
+@lru_cache(maxsize=4)
+def _load_embedder(model_name):
+    """Cache the sentence-transformer per process: ``eval`` runs the pipeline
+    a dozen times in a row and re-loading the weights each time dominates."""
+    return SentenceTransformer(model_name, token=HF_TOKEN)
+
+
 def main():
+    """Console entry point: run the pipeline over ``sys.argv``."""
+    run(sys.argv[1:])
+
+
+def run(argv=None):
     parser = argparse.ArgumentParser(
+        prog="ats-tailor tailor",
         description="Tailor a resume to a job description")
-    raw_args = sys.argv[1:]
+    raw_args = list(sys.argv[1:] if argv is None else argv)
     ignore_config_parse_keys = set()
     if any(a == "--no-llm" or a == "--llm" or a.startswith("--llm=") for a in raw_args):
         ignore_config_parse_keys.add("ATS_LLM_EXPAND")
@@ -109,7 +159,9 @@ def main():
     parser.add_argument("--llm-backend", choices=["auto", "mlx", "lmstudio", "ollama"],
                         default=config.LLM_BACKEND,
                         help="LLM backend (env: ATS_LLM_BACKEND, default: auto)")
-    args = parser.parse_args()
+    parser.add_argument("--check", action="store_true",
+                        help="compile the PDF and run the ATS parse/keyword check")
+    args = parser.parse_args(raw_args)
 
     # Wire CLI --llm-backend to config so llm.py picks it up
     config.LLM_BACKEND = args.llm_backend
@@ -178,6 +230,9 @@ def main():
             f"  Warning: {len(gaps)} JD term(s) not in index: {', '.join(gaps)}")
 
     # ── Optional LLM keyword expansion ──
+    # Keep the posting as written: the ATS check must score the resume against
+    # the JD's own words, not against terms the expansion invented.
+    jd_original = jd_text
     llm_terms = None
     if args.llm:
         backend_label = args.llm_backend if args.llm_backend != "auto" else "auto (MLX→LM Studio→Ollama)"
@@ -193,7 +248,7 @@ def main():
 
     # ── Load model & embed ──
     print(f"Loading embedding model ({args.model})...")
-    model = SentenceTransformer(args.model, token=HF_TOKEN)
+    model = _load_embedder(args.model)
     embed_dim = model.get_sentence_embedding_dimension()
 
     print("Embedding job description...")
@@ -404,6 +459,11 @@ def main():
             score_list.pop()
             line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data, sel_certs)
 
+    # Score order, captured before the page is re-sorted by date: evaluation
+    # measures ranking quality, which the chronological pass would destroy.
+    ranked_role_ids = [r["id"] for r in sel_roles]
+    ranked_project_ids = [p["id"] for p in sel_projects]
+
     # ── Chronological reordering (most recent first) ──
     proj_order = sorted(range(len(proj_ctx)), key=lambda i: parse_start_date(proj_ctx[i]["period"]), reverse=True)
     proj_ctx = [proj_ctx[i] for i in proj_order]
@@ -509,6 +569,62 @@ def main():
     print(f"  prompt.md        – copy-paste into Claude/ChatGPT")
     print(f"  match_report.md  – similarity scores & rankings")
     print(f"  match_viz.png    – visual score breakdown")
+
+    result = RunResult(
+        out_dir=out_dir,
+        tex_path=out_dir / "resume.tex",
+        company=args.company,
+        role=args.role,
+        role_ids=ranked_role_ids,
+        project_ids=ranked_project_ids,
+        cert_ids=[c["id"] for c in sel_certs],
+        skill_lines=[dict(line) for line in skill_lines],
+        entries=(
+            [{"kind": "education", "title": f'{e["degree"]} in {e["field"]}',
+              "organisation": e["institution"], "period": e["period"]} for e in education]
+            + [{"kind": "role", "id": r["id"], "title": r["title"],
+                "organisation": r["company"], "period": r["period"]} for r in sel_roles]
+            + [{"kind": "project", "id": p["id"], "title": p["name"],
+                "period": p["period"]} for p in sel_projects]
+        ),
+    )
+    (out_dir / "selection.json").write_text(json.dumps(result.to_dict(), indent=2) + "\n")
+
+    if args.check:
+        from .atscheck import (
+            compile_pdf, extract_text, index_term_forms, keyword_coverage,
+            output_filename, parse_check, resolve_terms, split_regions, summarize,
+            surface_form_set, write_reports,
+        )
+        from .atscheck import auto_terms as _auto_terms
+
+        print("\nCompiling and checking the PDF...")
+        compiled = compile_pdf(
+            result.tex_path, output_filename(profile.get("name", ""), args.company))
+        text = extract_text(compiled.pdf_path)
+        parse_report = parse_check(text, profile, result.entries, compiled.pages)
+
+        index_obj = load_index_for_terms(index_dir)
+        terms = index_term_forms(index_obj)
+        must, nice = _auto_terms(jd_original, index_obj)
+        selected = resolve_terms([*must, *nice], terms)
+        coverage = keyword_coverage(
+            text, selected, surface_form_set(terms), split_regions(text), must=must)
+        write_reports(out_dir, parse_report, coverage)
+        print(summarize(parse_report, coverage))
+        print(f"  reports: {out_dir / 'ats_check.md'}, {out_dir / 'ats_check.json'}")
+
+    return result
+
+
+def load_index_for_terms(index_dir):
+    """The index object ``atscheck.auto_terms`` wants, for either layout."""
+    from .index_io import detect_layout, load_index_v2
+
+    index_dir = Path(index_dir)
+    if detect_layout(index_dir) == "v2":
+        return load_index_v2(index_dir)
+    return load_index(index_dir)
 
 
 if __name__ == "__main__":

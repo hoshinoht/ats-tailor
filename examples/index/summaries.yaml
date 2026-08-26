@@ -1,3 +1,9 @@
 # yaml-language-server: $schema=.schema/summaries.schema.json
 
-default: ''
+# The Summary section is part of the ATS heading contract (docs/v2-design.md §2),
+# so the example corpus carries one; `render_resume(target_title=...)` appends the
+# target statement to it at render time.
+default: Computer Science undergraduate and backend engineer building microservices
+  in Go and Python, with production experience in Docker, PostgreSQL and AWS.
+highlights:
+  - Dean's List 2024

@@ -26,6 +26,9 @@ ats-tailor <command> [options]
 | `validate [index_dir]` | Load an index in either layout; print schema errors (exit 1) and non-fatal warnings (exit 0). |
 | `migrate <src> <dst> [--force]` | Convert a v1 index directory into the v2 layout and print a migration report. |
 | `schema [--out DIR \| --index DIR]` | Write JSON Schema files for the v2 index. `--out` (default `schema/`) writes a standalone copy; `--index DIR` writes them into `DIR/.schema/`, where the files' `$schema` hints point. |
+| `check <output_dir> …` | Compile the rendered resume and check that an ATS can read it: parse checks plus keyword coverage. Exit 1 if any parse check fails. |
+| `labels init <jd> --company --role` | Scaffold the per-JD ground truth file `eval` scores against. `labels list` prints what is on disk. |
+| `eval …` | Run the pipeline over every label file, score it, print the table, write `<config-hash>.json`. `--compare a.json b.json` diffs two results. |
 
 `python -m ats_tailor.tailor …` remains supported and is unchanged.
 
@@ -55,6 +58,7 @@ python -m ats_tailor.tailor \
 | `--llm-backend` | `auto`                       | LLM backend: `auto`, `mlx`, `lmstudio`, `ollama` |
 | `--rerank`      | off                          | Re-score top candidates with a cross-encoder     |
 | `--no-rerank`   | off                          | Disable env-enabled cross-encoder reranking      |
+| `--check`       | off                          | Compile the PDF and run the ATS check afterwards |
 
 ## Configuration
 
@@ -146,6 +150,127 @@ If `ATS_LLM_EXPAND=true` is set in the environment, pass `--no-llm` to force a n
 | `prompt.md`       | LLM prompt for optional bullet rewriting        |
 | `match_report.md` | Similarity scores and rankings                  |
 | `match_viz.png`   | Visual score breakdown                          |
+| `selection.json`  | What the run selected, in score order (input to `check` and `eval`) |
+| `ats_check.md/.json` | Parse + keyword report, written by `check` or `tailor --check` |
+
+## ATS requirements
+
+What "ATS-capable" means here is pinned down in `docs/v2-design.md` §2; the
+short version, all of it enforced by `ats-tailor check` against the compiled
+PDF rather than the LaTeX source:
+
+- **Parseable.** Single column, no tables or text boxes, a text layer of real
+  characters (no `(cid:NNN)`, no U+FFFD), and reading order equal to visual
+  order.
+- **Standard headings, exact strings** — `Summary`, `Education`, `Experience`,
+  `Projects`, `Skills`, `Certifications` — present and in that order.
+- **Contact block as printed text**: name on its own line; email, phone,
+  `linkedin.com/in/<handle>` and `github.com/<handle>` each recoverable by
+  regex, never carried only by an icon or a link target.
+- **Dates are ASCII hyphens with both endpoints** (`Mon YYYY - Mon YYYY`, or
+  `- Present`), on the same `pdftotext -layout` line as the entry title. En
+  dashes and bare single years are a confirmed silent Workday import failure.
+- **One page.**
+- **Keywords with context, never stuffing.** Must-have terms should appear in
+  the Skills line *and* in a bullet; nothing appears more than three times.
+  A term the index has no claim for is reported as a gap — the resume is
+  assembled from index claims by id, so it is never invented to fill one.
+
+### `check`
+
+```bash
+ats-tailor check output/cpf-sre-intern --jd jd/cpf.txt --index index
+```
+
+Compiles `resume.tex` if there is no PDF yet (add `--recompile` to force it),
+copies the result to `<First>_<Last>_Resume_<Company>.pdf`, then prints a
+summary and writes `ats_check.md` / `ats_check.json` into the run directory.
+Exit code is 1 when a parse check fails, so it drops straight into a script.
+
+Every JD term lands in one of four states:
+
+| State | Meaning | What to do |
+| --- | --- | --- |
+| `covered` | the JD's own surface form is on the page | nothing |
+| `synonym-only` | present through an alias, not the JD's word | align the rendered surface form |
+| `missing (have it)` | the index supports it, selection or the page budget dropped it | re-rank or make room |
+| `missing (gap)` | no index claim carries it | report it, never stuff it |
+
+Terms come from `--labels <file>` when you have one, otherwise they are derived
+from the JD by `auto_terms`. Either way a term may be written the way the JD
+writes it, as an alias, or as the index's canonical name — it resolves to the
+same alias set, and exactness is judged against the spelling you gave.
+`--jd` may be omitted to run the parse checks alone.
+
+### `labels`
+
+Ground truth lives in the resume repo, one tracked file per JD:
+
+```bash
+ats-tailor labels init jd/cpf.txt --company cpf --role sre-intern \
+  --labels-dir labels --index index
+```
+
+The scaffold pre-fills the term lists and leaves every judgement empty for you
+to fill in. Terms are written in the JD's own wording (the posting says `K8s`,
+so the label says `K8s`), tiered by the section they appear under — a
+requirements heading makes a term must-have, a "nice to have" heading or plain
+prose makes it nice — and JD technologies with no index claim behind them are
+included as nice terms marked `# not in index`, so a scaffold can surface real
+gaps and not just taxonomy hits:
+
+```yaml
+must_terms:
+  - Kubernetes
+nice_terms:
+  - Terraform  # not in index
+```
+
+The full shape:
+
+```yaml
+jd: jd/cpf.txt
+company: cpf
+role: sre-intern
+pin_projects: [carehaven]   # ids the run must select
+pin_roles: [razer-swe]
+exclude: [wishbone]         # ids it must never select
+must_terms: [Kubernetes, Prometheus, Grafana, Linux]
+nice_terms: [Terraform, AKS]
+ranking:                    # optional full preference order
+  projects: [carehaven, virtualkopis, digital-kopitiam]
+```
+
+### `eval`
+
+```bash
+ats-tailor eval --index index --labels-dir labels --jd-dir jd --out eval
+```
+
+Runs the pipeline for every label into `eval/runs/<slug>/`, compiles, checks,
+and prints a per-JD table with means:
+
+| Metric | Meaning |
+| --- | --- |
+| `must` / `nice` | share of the tier's terms present on the page |
+| `ctx` | share of present must-terms in the Skills line *and* a bullet |
+| `parse` / `pg` | parse checks passed, and the page count |
+| `P@k proj` / `P@k role` | precision of the top-*k* selected items against the pins (*k* = number of pins) |
+| `excl` | excluded ids the run selected anyway — should be 0 |
+| `tau` | Kendall τ against the label's full preference order |
+
+A metric with nothing to measure prints `—` and is left out of the mean. A
+label whose JD file is not on this machine is skipped with a note and listed
+under the table — labels are tracked, postings are local, so a missing one is
+normal rather than a failed sweep.
+Results are written to `eval/<config-hash>.json`, where the hash covers every
+`ATS_*` setting, the embedding model, the index content, the engine's own
+sources and its git HEAD — so two runs are only comparable when the hash says
+they are, and editing the scorer changes the hash even before it is committed:
+
+```bash
+ats-tailor eval --compare eval/8672be16bb0d.json eval/<new>.json
+```
 
 ## Index layout (v2)
 

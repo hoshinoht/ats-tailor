@@ -349,6 +349,8 @@ compose run --rm -it app ats-tailor tui` for the TUI, `ats-tailor serve`
 |---|---|---|
 | 1 | Schema, per-entity layout, migration, compat loader, `pyproject`/`uv`, CLI (`validate`, `migrate`), tests | — |
 | 2 | `check` (parse + keyword coverage on PDF), labels format, `eval` baseline on v1 pipeline | 1 |
-| 3 | Pipeline v2: extraction, claims, matrix, greedy selection, alias-aligned rendering, compile loop, SQLite store, `sync` | 1, 2 |
+| 3a | `ats-match` core (types, BM25, RRF, greedy selection, metrics) in a uv workspace; adapter index→claims; deterministic requirement parser; v2 pipeline with compile loop behind `--engine v2`; eval parity with v1 | 1, 2 |
+| 3b | SQLite runtime store (`entities`, `embeddings`, `jd_profiles`, `runs`, `overrides`, `labels`), `sync`, per-run `overrides.yaml` honoured by selection (pins/excludes/edited text), run records | 3a |
+| 3c | LLM provider interface (`ollama|lmstudio|mlx|none|external`), requirement extraction + gates, alias-aligned surface forms in rendering, summary variants + target title, v2 becomes the default engine | 3b |
 | 4 | `service.py`, LLM provider interface, Textual TUI, MCP server, Dockerfile/Compose | 3 |
 | 5 | Variant proposals + summary polish with metric guardrail (agent via MCP or local model), approval in TUI | 4 |
