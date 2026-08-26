@@ -930,3 +930,96 @@ Deviations from `docs/plans/phase-5.md`, all deliberate:
   proposal passed. An agent that conflated them would accept a refused
   rewrite, so the two are separate keys and the violations come with the
   answer.
+
+### Live extraction result (2026-08-27)
+
+The `--provider ollama` arm of the Phase 3c exit criterion, deferred in 3c
+because no local model was reachable, is now measured. `gpt-oss:20b` on Ollama
+(`ATS_LLM_NUM_CTX=16384`, `ATS_RERANK=false`), over the same fourteen labelled
+JDs, against the current `none` baseline (`eval/f3056afb53e7.json`):
+
+| metric | none | ollama | delta |
+|---|---|---|---|
+| must_coverage | 75.02% | 74.02% | −0.010 |
+| nice_coverage | 34.46% | 40.16% | **+0.057** |
+| context_rate | 51.43% | 46.90% | −0.045 |
+| parse_ok | 100% | 100% | +0.000 |
+| pages | 1.00 | 1.00 | +0.000 |
+| exclusion_violations | 0 | 0 | +0.000 |
+
+**A model is still not the better reader**, so `ATS_LLM_PROVIDER` keeps its
+default and `--provider ollama` stays opt-in. What the run bought and what it
+cost are both worth writing down, because the first is a fixed bug and the
+second is the next one.
+
+**The bug: a model told to copy the posting's spelling is a model whose answers
+the index cannot match.** `prompt_extract.md.j2` asked for the posting's literal
+words ("K8s", not "Kubernetes"), and `parse_profile` resolved them by exact
+lookup in the alias map. A posting does not write alias-shaped strings: it
+writes "Azure Kubernetes Services (AKS)", "Infrastructure as Code (IaC)",
+"DevOps CI/CD workflows". Across the fourteen postings **81% of the 274 terms
+the model produced resolved to nothing** — and a requirement whose terms resolve
+to nothing is scored by the embedding channel alone, because `term_overlap` is
+empty and the BM25 channel of `build_matrix` has no folded token to find. Half
+the scoring went dark on the majority of what the model said, which is the worst
+possible failure mode: silent, and invisible in the means.
+
+Two changes, both measured:
+
+- **Terms are scanned, not looked up.** `extract.normalise_term` finds every
+  index surface form that occurs *inside* the phrase, under exactly
+  `count_in_text`'s semantics (punctuated names as substrings, `C`/`Go`/`R`
+  case-sensitively, everything else on a word boundary), longest first, with a
+  longer match swallowing the shorter ones inside its span. "Azure Kubernetes
+  Services (AKS)" answers `Kubernetes`; "Postgres/PostgreSQL tuning" answers
+  `PostgreSQL` once. A phrase no form appears in is kept verbatim — that is a
+  gap term, and the one thing this must never do is quietly delete a
+  requirement the index cannot cover. On the *existing* cached extractions, with
+  no re-extraction at all, this lifts the on-vocabulary rate from 19% to 32%.
+- **The prompt shows the model the vocabulary.** `index_vocabulary` renders one
+  line per skill (`Kubernetes (K8s, Container Orchestration, kubectl)`) — 59
+  lines, ~3.4 kB, under a 7000-character cap so a larger index drops its tail
+  instead of the posting — and asks for `terms` in those words, with the
+  posting's own spelling moved to a new optional `surface` list that nothing
+  matches against. Re-extracting cpf, hitachi and mediatek took the
+  on-vocabulary rate from 33% to 48%, and on cpf every term that *could* resolve
+  now does: what is left (`Azure`, `Terraform`, `Infrastructure as Code`) is not
+  in the index, which is the honest answer.
+
+Two decisions inside that:
+
+- **Normalisation happens at cache *read* time as well as at parse time.** The
+  rows in the store were written by whatever prompt was current when they were
+  made. Bumping `ATS_PROMPT_VERSION` to `extract-2` re-extracts them, but the
+  scanning step is post-processing, not a prompt, and a code change to it should
+  not need fourteen model calls to take effect. So `extract_requirements`
+  re-normalises what it reads back. The same call applies the archetype guard,
+  so a stored `"Intern"` does not outlive the version that accepted it.
+- **The archetype is checked against the category list.** Two of the fourteen
+  extractions answered `Intern` and one `Student` where the prompt asked for one
+  of the candidate's skill categories, and `_reconcile` only backfills an
+  archetype that is *absent* — so an invented one won, and picked the summary
+  variant. `valid_archetype` returns `None` for anything not on the list, which
+  puts the deterministic count back in charge. All fourteen archetypes are now
+  valid; cpf went from `Intern` to `Cloud & Infrastructure`.
+
+**What remains, and it is not the vocabulary.** The fix worked and the means
+barely moved (must 74.0% → 74.0%, context 46.4% → 46.9% against the previous
+live run). The reason is visible in the requirement counts: 244 requirements
+across the corpus with `none`, **322 with `ollama`**. The model splits a posting
+into more requirements than the parser does, and — this is the defect —
+**92 of its 193 requirements name no term at all, and every one of them carries
+weight 1.0**: "Able to explain technical ideas in a simple way", "Currently
+pursuing a Degree in …", "Works well independently and with others". That is
+48% of the model's total requirement weight spent on lines every claim answers
+about equally well. The deterministic parser has always weighted exactly those
+at `ATS_SOFT_REQ_WEIGHT` (0.25) — `requirements_from_jd` does it, and
+`merge_fallback` does it for the safety net, where 50 term-less requirements
+carry 12.5 of 52.0 weight. The extraction path is the only one that does not,
+and the selection it produces is diluted accordingly: `must_coverage` holds
+because the terms still reach the page, but `context_rate` falls because the
+bullets chosen are answering boilerplate. Applying the soft-weight rule to
+extracted requirements whose normalised terms are empty is the obvious next
+measurement — and it is only *now* a safe rule to apply, because before this
+phase "empty terms" meant "the model spelled it the posting's way", not "the
+requirement names nothing".

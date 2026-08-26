@@ -623,7 +623,7 @@ def provider_choice(args):
 def _run_v2(args, jd_text, profile, index_dir, out_dir, overrides=None, store=None):
     """The v2 engine, which needs the typed index rather than the v1 dicts."""
     from ...index.io import detect_layout, load_index_v2
-    from ...jd.extract import term_alias_map
+    from ...jd.extract import index_vocabulary, term_alias_map
     from ...llm.provider import get_provider
     from ..pipeline import V2Options, tailor_v2
 
@@ -635,7 +635,8 @@ def _run_v2(args, jd_text, profile, index_dir, out_dir, overrides=None, store=No
     index = load_index_v2(index_dir)
 
     name, model_override = provider_choice(args)
-    provider = get_provider(name, alias_map=term_alias_map(index))
+    provider = get_provider(name, alias_map=term_alias_map(index),
+                            vocabulary=index_vocabulary(index))
     if model_override and hasattr(provider, "model"):
         provider.model = model_override
     if provider.name != "none":

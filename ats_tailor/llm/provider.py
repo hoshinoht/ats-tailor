@@ -230,11 +230,14 @@ class _ModelProvider:
 
     name = "model"
 
-    def __init__(self, model: str | None = None, alias_map=None):
+    def __init__(self, model: str | None = None, alias_map=None, vocabulary=None):
         self.model = model or config.LLM_MODEL
         #: Lowercased surface form → canonical index term, so the posting's
         #: "K8s" comes back as the vocabulary the claims are tagged with.
         self.alias_map = dict(alias_map or {})
+        #: The same vocabulary as printable lines, shown to the model in the
+        #: prompt so it answers in those words in the first place.
+        self.vocabulary = list(vocabulary or ())
 
     # ── to be provided ──
     def healthy(self) -> bool:
@@ -247,7 +250,8 @@ class _ModelProvider:
     def extract(self, jd_text, categories, prompt_version):
         from ..jd.extract import parse_profile, render_extract_prompt
 
-        prompt = render_extract_prompt(jd_text, categories)
+        prompt = render_extract_prompt(jd_text, categories,
+                                       vocabulary=self.vocabulary)
         try:
             raw = self.generate(prompt, "extract", EXTRACT_MAX_TOKENS, EXTRACT_NUM_CTX)
         except Exception as exc:  # a model that fails is a model that is absent
@@ -260,7 +264,7 @@ class _ModelProvider:
                   f"falling back to the deterministic parser", file=sys.stderr)
             return None
         return parse_profile(payload, self.alias_map, provider=self.name,
-                             prompt_version=prompt_version)
+                             prompt_version=prompt_version, categories=categories)
 
     def rerank(self, requirement, claims):
         claims = list(claims)
@@ -345,8 +349,8 @@ class LMStudioProvider(_ModelProvider):
 class MLXProvider(_ModelProvider):
     name = "mlx"
 
-    def __init__(self, model: str | None = None, alias_map=None):
-        super().__init__(model or config.MLX_MODEL, alias_map)
+    def __init__(self, model: str | None = None, alias_map=None, vocabulary=None):
+        super().__init__(model or config.MLX_MODEL, alias_map, vocabulary)
 
     def healthy(self) -> bool:
         return backends.mlx_available()
@@ -371,12 +375,15 @@ _CLASSES = {
 }
 
 
-def get_provider(name: str | None = None, alias_map=None, profile=None, quiet=False):
+def get_provider(name: str | None = None, alias_map=None, profile=None, quiet=False,
+                 vocabulary=None):
     """The provider called ``name``; ``auto`` probes and falls back to ``none``.
 
-    ``alias_map`` (surface form → skill id) lets an extracting provider
-    normalise the posting's vocabulary against the index. ``profile`` is only
-    read by ``external``.
+    ``alias_map`` (lowercased surface form → canonical index term) lets an
+    extracting provider normalise the posting's vocabulary against the index,
+    and ``vocabulary`` (:func:`ats_tailor.jd.extract.index_vocabulary`) is the
+    same thing in the prompt, so the normalisation has less work to do.
+    ``profile`` is only read by ``external``.
     """
     requested = str(name or config.LLM_PROVIDER or "auto").strip().lower()
     say = (lambda *_a, **_k: None) if quiet else (
@@ -387,14 +394,14 @@ def get_provider(name: str | None = None, alias_map=None, profile=None, quiet=Fa
     if requested == "none":
         return NoneProvider()
     if requested in _CLASSES and requested != "auto":
-        return _CLASSES[requested](alias_map=alias_map)
+        return _CLASSES[requested](alias_map=alias_map, vocabulary=vocabulary)
     if requested != "auto":
         raise ValueError(
             f"unknown provider {name!r}; expected one of: {', '.join(config.PROVIDERS)}"
         )
 
     for candidate in AUTO_ORDER:
-        provider = _CLASSES[candidate](alias_map=alias_map)
+        provider = _CLASSES[candidate](alias_map=alias_map, vocabulary=vocabulary)
         try:
             healthy = provider.healthy()
         except Exception:

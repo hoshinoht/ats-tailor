@@ -714,7 +714,8 @@ def _cmd_jd(argv: list[str]) -> int:
     import tempfile
 
     from .jd.extract import (
-        FALLBACK_PROVIDER, extract_requirements, save_edited, term_alias_map,
+        FALLBACK_PROVIDER, extract_requirements, index_vocabulary, save_edited,
+        term_alias_map,
     )
     from .jd.hashing import jd_hash
     from .jd.models import JDProfile
@@ -776,7 +777,8 @@ def _cmd_jd(argv: list[str]) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    provider = get_provider(args.provider, alias_map=term_alias_map(index))
+    provider = get_provider(args.provider, alias_map=term_alias_map(index),
+                            vocabulary=index_vocabulary(index))
     store = _open_store(index_dir, args.data_dir)
     try:
         profile = extract_requirements(

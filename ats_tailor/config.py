@@ -119,7 +119,7 @@ LLM_PROVIDER = _str("ATS_LLM_PROVIDER", "auto")
 PROVIDERS = ("auto", "ollama", "lmstudio", "mlx", "none", "external")
 #: Bumped whenever `jd/prompt_extract.md.j2` changes meaning: it is part of the
 #: extraction cache key, so an old profile is never served for a new prompt.
-PROMPT_VERSION = _str("ATS_PROMPT_VERSION", "extract-1")
+PROMPT_VERSION = _str("ATS_PROMPT_VERSION", "extract-2")
 #: Requirements kept from one posting, by weight. A posting with more than this
 #: many distinct asks is mostly prose about itself.
 MAX_REQUIREMENTS = _int("ATS_MAX_REQUIREMENTS", 40)

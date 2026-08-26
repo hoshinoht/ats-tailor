@@ -122,7 +122,7 @@ cp .env.example .env
 | `ATS_EMBED_MODEL`           | `all-MiniLM-L12-v2`           | `--model`       |
 | `ATS_LLM_MODEL`             | `qwen3.5:4b`                  | `--llm`         |
 | `ATS_LLM_PROVIDER`          | `auto`                        | `--provider`    |
-| `ATS_PROMPT_VERSION`        | `extract-1`                   | —               |
+| `ATS_PROMPT_VERSION`        | `extract-2`                   | —               |
 | `ATS_LLM_TIMEOUT`           | `600`                         | —               |
 | `ATS_LLM_PROBE_TIMEOUT`     | `1.5`                         | —               |
 | `ATS_OLLAMA_URL`            | `http://localhost:11434`      | —               |
@@ -213,7 +213,7 @@ ats-tailor jd show jd/cpf.txt --provider ollama --reextract
 ats-tailor jd show jd/cpf.txt --edit          # correct it; the edit wins from now on
 ```
 
-Three rules govern what comes out:
+Four rules govern what comes out:
 
 1. **The deterministic parser always runs**, model or no model. Requirements it
    produced whose terms the extraction never mentions are appended at
@@ -223,11 +223,36 @@ Three rules govern what comes out:
 3. **The posting is data, never instruction.** The prompt wraps it in an
    explicit trust boundary, and whatever comes back is validated by pydantic
    before anything reads it.
+4. **A requirement's `terms` are the index's words, not the posting's.** Scoring
+   matches requirement terms against claim terms, and claims are tagged with the
+   index's canonical names, so "Azure Kubernetes Services (AKS)" has to become
+   `Kubernetes` before the BM25 and term-overlap channels can see it at all. Two
+   things make that happen: the prompt shows the model the index's own
+   vocabulary and asks it to answer in those words, and every term that comes
+   back — from a model or from the cache — is *scanned* for index surface forms
+   rather than looked up, so a phrase the model wrote its own way still resolves.
+   A phrase no form appears in is kept exactly as written: that is a genuine gap
+   and must stay visible as one. The posting's own spelling is kept alongside, in
+   `surface`, and nothing matches against it.
+
+An extraction's `archetype` is checked against the candidate's category names
+and dropped if it is not one of them — a model asked for a category answers
+"Intern", and an invented archetype would override the one counted from the
+posting and pick the wrong summary variant.
 
 Extractions are cached on `(jd hash, provider, prompt version)`, so a model
-sweep is paid for once and is reproducible afterwards. The deterministic profile
-is stored but never served from the cache: it costs milliseconds to recompute,
-and a cached copy would outlive the parser that made it.
+sweep is paid for once and is reproducible afterwards. Bump
+`ATS_PROMPT_VERSION` when the prompt changes meaning; a cached profile is
+re-normalised against the current index vocabulary when it is read, so a *code*
+change to that step reaches old rows without re-extraction. The deterministic
+profile is stored but never served from the cache: it costs milliseconds to
+recompute, and a cached copy would outlive the parser that made it.
+
+**A local model is not yet the better default.** Measured against the fourteen
+labelled postings with `gpt-oss:20b` on Ollama, `--provider ollama` scores
+must 74% / nice 40% / context 47% where `--provider none` scores 75% / 34% /
+51% — it finds more of the nice-to-haves and fewer of the must-have terms in
+context. See `docs/v2-design.md` §8 for what is still in the way.
 
 **Gates** are hard filters — citizenship and clearance, a language the profile
 does not declare, relocation, a closing date, a seniority bar. They are printed

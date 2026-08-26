@@ -27,7 +27,7 @@ A single JSON object with exactly these keys:
     "seniority":   {"verdict": "pass|fail|flag|unknown", "quote": null, "note": null}
   },
   "requirements": [
-    {"text": "...", "kind": "must|nice|responsibility", "category": "...", "weight": 1.0, "terms": ["..."]}
+    {"text": "...", "kind": "must|nice|responsibility", "category": "...", "weight": 1.0, "terms": ["..."], "surface": ["..."]}
   ]
 }
 ```
@@ -41,9 +41,17 @@ A single JSON object with exactly these keys:
   importance: `must` under requirements/qualifications/"what you'll need",
   `nice` under nice-to-have/preferred/bonus, `responsibility` under
   responsibilities/"what you'll do".
-- **`terms` are the posting's literal technology and skill words** — copy the
-  spelling the posting used ("K8s", not "Kubernetes"; "Amazon Web Services",
-  not "AWS"). Leave the list empty when a requirement names no technology.
+- **`terms` are the technology and skill words the requirement names, written
+  in the candidate's vocabulary** (the list below) whenever the posting is
+  talking about something on it. "Solid grasp of K8s" gives
+  `["Kubernetes"]`{% if vocabulary %}; "Azure Kubernetes Services (AKS)" names more than one thing,
+  so it gives every entry it names{% endif %}. Use the posting's own word only when nothing on
+  the list means the same thing — an unmatched term is a real gap and must not
+  be replaced by the nearest thing on the list. Leave the list empty when a
+  requirement names no technology at all.
+- **`surface` is the posting's own spelling** of the same things, in the same
+  order — `["K8s"]`, `["Azure Kubernetes Services (AKS)"]`. Omit it, or leave
+  it empty, when the posting spelled them the way `terms` does.
 - **`weight`** is between 0.5 and 1.5 and defaults to 1.0. Use it only when the
   posting itself insists ("must have", "critical") or hedges ("exposure to",
   "any of").
@@ -76,7 +84,23 @@ invent a quote: `quote` is either text copied from the posting or null.
 
 {% for category in categories %}- {{ category }}
 {% endfor %}
+`archetype` must be one of those names, copied exactly, or null. It is the
+candidate's own area, not the job's seniority: never answer "Intern",
+"Student", "Engineer", or anything else that is not on the list.
+{% if vocabulary %}
+## The candidate's vocabulary
 
+The names to use in `terms`. Each line is one thing: the name to write first,
+then the other spellings that mean it, in brackets. A posting saying "K8s",
+"kubectl" or "container orchestration" is saying `Kubernetes`.
+
+{% for entry in vocabulary %}- {{ entry }}
+{% endfor %}
+This list is the candidate's, not the job's. A posting asking for something
+that is not on it is asking for something the candidate may not have, and you
+must say so by writing the posting's own words in `terms` — never by picking
+the closest line above.
+{% endif %}
 ## The posting
 
 <<<JOB_POSTING

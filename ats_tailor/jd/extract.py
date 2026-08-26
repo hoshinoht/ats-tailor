@@ -35,6 +35,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from .. import config
 from ..ats.check import count_in_text, gap_terms, index_term_forms
+from ..engine.legacy.scoring import AMBIGUOUS_KEYWORDS
 from .gates import cross_check, detect_gates
 from .hashing import jd_hash
 from .models import JDProfile, RequirementSpec, WEIGHT_RANGE, squash
@@ -48,6 +49,11 @@ FALLBACK_PROVIDER = "fallback"
 #: Providers whose stored ``extracted_json`` is a cache worth reading back.
 #: ``none`` and ``fallback`` are not on it on purpose — see the module docstring.
 CACHEABLE = ("ollama", "lmstudio", "mlx", "external")
+
+#: How much of the prompt the index's vocabulary is allowed to take. ~1 token
+#: per 3.5 characters, so 7000 characters is under the 2k-token budget the
+#: extraction prompt can spare next to a posting.
+VOCABULARY_CHARS = 7000
 
 #: Words that make a line a job title. Used only by the deterministic title
 #: guess, which is why the list is nouns and not a taxonomy.
@@ -89,20 +95,28 @@ def render_extract_prompt(
     categories: Sequence[str] = (),
     languages: Sequence[str] = (),
     today: date | None = None,
+    vocabulary: Sequence[str] = (),
 ) -> str:
-    """The extraction prompt, posting included, trust boundary and all."""
+    """The extraction prompt, posting included, trust boundary and all.
+
+    ``vocabulary`` is :func:`index_vocabulary` — the names the index can match.
+    Showing it is what turns "Azure Kubernetes Services (AKS)" into terms the
+    scoring can use; the posting's own spelling is asked for separately, in
+    ``surface``, so nothing is lost by asking for the canonical one.
+    """
     env = Environment(loader=FileSystemLoader(str(PKG_DIR)), autoescape=False)
     template = env.get_template(PROMPT_TEMPLATE)
     return template.render(
         jd_text=str(jd_text or "").strip(),
         categories=list(categories),
         languages=list(languages),
+        vocabulary=list(vocabulary),
         max_requirements=config.MAX_REQUIREMENTS,
         today=(today or date.today()).isoformat(),
     )
 
 
-# ── Validating what came back ────────────────────────────────────────────────
+# ── The index's own words ────────────────────────────────────────────────────
 def term_alias_map(index: Any) -> dict[str, str]:
     """Lowercased surface form → the canonical index term it stands for.
 
@@ -110,14 +124,157 @@ def term_alias_map(index: Any) -> dict[str, str]:
     Requirement terms are matched against claim terms, and those are surface
     forms, so the canonical *name* is what a posting's "K8s" has to become.
     """
+    return alias_map_from_forms(index_term_forms(index))
+
+
+def alias_map_from_forms(term_forms: Mapping[str, Sequence[str]]) -> dict[str, str]:
+    """:func:`term_alias_map` from an already-computed ``index_term_forms``.
+
+    The pipeline computes the vocabulary once per run and hands it around; this
+    is the same map without paying for the index walk a second time.
+    """
     mapping: dict[str, str] = {}
-    for term, forms in index_term_forms(index).items():
-        canonical = term.strip()
-        for form in [term, *forms]:
+    for term, forms in term_forms.items():
+        canonical = str(term).strip()
+        for form in [term, *(forms or ())]:
             key = str(form).strip().lower()
             if key and (key not in mapping or key == canonical.lower()):
                 mapping[key] = canonical
     return mapping
+
+
+def index_vocabulary(
+    index: Any, limit: int = VOCABULARY_CHARS, term_forms=None
+) -> list[str]:
+    """One line per skill — ``Kubernetes (K8s, Container Orchestration)``.
+
+    This is what the extraction prompt shows the model so it answers in words
+    the index can actually match. Skills only, not every item keyword: the
+    keyword list is four times longer and mostly repeats the skill names, and a
+    prompt that spends two thousand tokens on vocabulary has spent them on
+    something other than the posting. Truncated at ``limit`` characters, in
+    index order, so a much larger index degrades by dropping the tail rather
+    than by blowing the context window.
+    """
+    lines: list[str] = []
+    if hasattr(index, "all_skills"):
+        for skill in index.all_skills():
+            forms = [str(f).strip() for f in skill.surface_forms()]
+            name = forms[0] if forms else str(skill.name).strip()
+            others = [f for f in forms[1:] if f.lower() != name.lower()]
+            lines.append(f"{name} ({', '.join(others)})" if others else name)
+    else:  # a v1 index has no canonical/alias distinction; list the terms
+        lines = [str(term) for term in (term_forms or index_term_forms(index))]
+
+    kept, spent = [], 0
+    for line in lines:
+        if spent + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        spent += len(line) + 1
+    return kept
+
+
+# ── Speaking the index's language ────────────────────────────────────────────
+def _spans(form: str, text: str, text_lower: str) -> list[tuple[int, int]]:
+    """Where ``form`` occurs in ``text``, under :func:`count_in_text` semantics.
+
+    Same three branches, same answers — punctuated names ("C++", "CI/CD") match
+    as substrings, ``C``/``Go``/``R`` match case-sensitively against the
+    original, everything else on a lowercased word boundary — but returning the
+    spans rather than a count, because a longer form has to be able to swallow
+    the shorter ones sitting inside it.
+    """
+    kw = form.lower()
+    if not kw.replace(" ", "").replace("-", "").isalnum():
+        pattern, target = re.escape(kw), text_lower
+    elif kw in AMBIGUOUS_KEYWORDS or (len(kw) <= 2 and kw.isalpha()):
+        pattern, target = r"\b" + re.escape(form) + r"\b", text
+    else:
+        pattern, target = r"\b" + re.escape(kw) + r"\b", text_lower
+    return [m.span() for m in re.finditer(pattern, target)]
+
+
+def normalise_term(phrase: str, aliases: Mapping[str, str]) -> list[str]:
+    """The index terms named *inside* ``phrase``; ``[phrase]`` when none is.
+
+    A model told to copy the posting's spelling answers "Azure Kubernetes
+    Services (AKS)", "Infrastructure as Code (IaC)", "DevOps CI/CD workflows".
+    Resolving those by exact lookup finds nothing, and a requirement whose terms
+    resolve to nothing scores through the embedding channel alone — the BM25 and
+    term-overlap channels of ``ats_match.build_matrix`` go dark. So the phrase is
+    *scanned* instead of looked up: every surface form the index knows that
+    occurs in it with word boundaries becomes the canonical term it stands for.
+
+    Longest first, and a form whose every occurrence sits inside one already
+    taken is dropped — "Amazon Web Services" answers ``AWS`` once, not ``AWS``
+    plus whatever "Services" happens to be an alias of. A phrase no form matches
+    is kept exactly as it came: that is a gap term, and a gap the index cannot
+    cover still has to be visible as one.
+    """
+    text = squash(phrase)
+    if not text or not aliases:
+        return [text] if text else []
+    lowered = text.lower()
+
+    found: list[tuple[int, int, str]] = []
+    taken: list[tuple[int, int]] = []
+    for key in sorted(aliases, key=lambda k: (-len(k), k)):
+        canonical = str(aliases[key]).strip()
+        if not canonical:
+            continue
+        # The map is keyed lowercase; C/Go/R match case-sensitively, and the
+        # canonical name is the one spelling of the key that kept its case.
+        form = canonical if canonical.lower() == key else key
+        fresh = [
+            span for span in _spans(form, text, lowered)
+            if not any(start <= span[0] and span[1] <= end for start, end in taken)
+        ]
+        if not fresh:
+            continue
+        taken.extend(fresh)
+        found.append((fresh[0][0], -len(key), canonical))
+
+    if not found:
+        return [text]
+    return _dedupe(canonical for _, _, canonical in sorted(found))
+
+
+def normalise_profile_terms(
+    profile: JDProfile, aliases: Mapping[str, str]
+) -> JDProfile:
+    """:func:`normalise_term` over every requirement of a whole profile.
+
+    Applied to a profile read back from the cache as well as to a fresh one:
+    the rows in the store were written by an earlier prompt that asked for the
+    posting's spelling, and normalising at read time is what lets them benefit
+    without being re-extracted.
+    """
+    return profile.model_copy(update={"requirements": [
+        spec.model_copy(update={
+            "terms": _normalise_terms(spec.terms, aliases),
+            "surface": _dedupe(spec.surface or spec.terms),
+        })
+        for spec in profile.requirements
+    ]})
+
+
+def valid_archetype(value: Any, categories: Sequence[str]) -> str | None:
+    """``value`` when it names one of ``categories``, otherwise ``None``.
+
+    An extractor asked for "one of the candidate categories" answers "Intern"
+    or "Student", and an invented archetype overrides the deterministic one —
+    which is counted from the posting rather than imagined, and picks the
+    summary variant. With no categories to check against, nothing is claimed
+    and the value stands.
+    """
+    text = squash(value)
+    if not text or not categories:
+        return text or None
+    for category in categories:
+        if squash(category).lower() == text.lower():
+            return squash(category)
+    return None
 
 
 def parse_profile(
@@ -125,13 +282,16 @@ def parse_profile(
     alias_map: Mapping[str, str] | None = None,
     provider: str = "external",
     prompt_version: str = "",
+    categories: Sequence[str] = (),
 ) -> JDProfile | None:
     """Validate and normalise one extraction. ``None`` when it is unusable.
 
-    Normalisation, in order: schema, then terms through the alias map (unknown
-    terms stay as the posting wrote them — a requirement the index cannot cover
-    is still a requirement), then dedupe by normalised text, then the weight
-    band, then a cap at ``ATS_MAX_REQUIREMENTS`` by weight. Requirements with no
+    Normalisation, in order: schema, then the archetype against ``categories``
+    (an invented one becomes ``None`` so the deterministic count backfills it),
+    then terms through :func:`normalise_term` (a phrase no index form appears in
+    stays as the posting wrote it — a requirement the index cannot cover is
+    still a requirement), then dedupe by normalised text, then the weight band,
+    then a cap at ``ATS_MAX_REQUIREMENTS`` by weight. Requirements with no
     letters in them are dropped: an extractor that emits "3+" has emitted noise
     with an id.
     """
@@ -156,24 +316,26 @@ def parse_profile(
         text = squash(spec.text)
         if not any(ch.isalpha() for ch in text):
             continue
-        terms = _normalise_terms(spec.terms, aliases)
-        key = text.lower()
         candidate = spec.model_copy(update={
             "text": text,
-            "terms": terms,
+            "terms": _normalise_terms(spec.terms, aliases),
+            # What the posting called them, kept for the report. An extractor
+            # that answered with none is one whose `terms` *are* the posting's
+            # words, so those stand in — before normalisation moves them onto
+            # the index's.
+            "surface": _dedupe(spec.surface or spec.terms),
             "weight": min(max(float(spec.weight), low), high),
         })
+        key = text.lower()
         existing = kept.get(key)
         if existing is None:
             kept[key] = candidate
-        elif candidate.weight > existing.weight:
-            kept[key] = candidate.model_copy(update={
-                "terms": _dedupe([*existing.terms, *candidate.terms])
-            })
-        else:
-            kept[key] = existing.model_copy(update={
-                "terms": _dedupe([*existing.terms, *candidate.terms])
-            })
+            continue
+        winner = candidate if candidate.weight > existing.weight else existing
+        kept[key] = winner.model_copy(update={
+            "terms": _dedupe([*existing.terms, *candidate.terms]),
+            "surface": _dedupe([*existing.surface, *candidate.surface]),
+        })
 
     ordered = list(kept.values())
     if len(ordered) > config.MAX_REQUIREMENTS:
@@ -185,6 +347,7 @@ def parse_profile(
         ordered = [ordered[i] for i in sorted(keep)]
 
     return profile.model_copy(update={
+        "archetype": valid_archetype(profile.archetype, categories),
         "requirements": _renumber(ordered),
         "provider": provider,
         "prompt_version": prompt_version,
@@ -192,7 +355,10 @@ def parse_profile(
 
 
 def _normalise_terms(terms: Iterable[str], aliases: Mapping[str, str]) -> list[str]:
-    return _dedupe(aliases.get(squash(term).lower(), squash(term)) for term in terms)
+    out: list[str] = []
+    for term in terms:
+        out.extend(normalise_term(term, aliases))
+    return _dedupe(out)
 
 
 def _dedupe(values: Iterable[str]) -> list[str]:
@@ -399,6 +565,7 @@ def extract_requirements(
     gaps = gap_terms(jd_text, index, extra_known=list(extra_known)) if gaps is None else gaps
     fallback = deterministic_profile(
         jd_text, index, term_forms, gaps, languages, today=today)
+    categories = [category.category for category in getattr(index, "skills", [])]
 
     stored = _stored(store, digest, row_provider, row_version)
     edited = JDProfile.from_json(stored.edited) if stored is not None else None
@@ -412,8 +579,16 @@ def extract_requirements(
     if stored is not None and not reextract and row_provider in CACHEABLE:
         cached = JDProfile.from_json(stored.extracted)
         if cached is not None:
-            cached = cached.model_copy(update={
+            # A stored profile was written by whatever prompt was current when
+            # it was made, so it is re-normalised on the way out rather than
+            # trusted: the vocabulary alignment is post-processing, and a row
+            # that predates it should not be the one run that misses out.
+            cached = normalise_profile_terms(
+                cached, alias_map_from_forms(term_forms)
+            ).model_copy(update={
                 "provider": stored.provider, "prompt_version": prompt_version,
+                "archetype": valid_archetype(cached.archetype, categories)
+                             or fallback.archetype,
                 "cached": True,
             })
 
@@ -421,10 +596,7 @@ def extract_requirements(
     if profile is None:
         answer = None
         if name not in {"none", FALLBACK_PROVIDER}:
-            answer = provider.extract(
-                jd_text, [category.category for category in getattr(index, "skills", [])],
-                prompt_version,
-            )
+            answer = provider.extract(jd_text, categories, prompt_version)
         # The safety net, the gate cross-check and the title fallback apply to a
         # *fresh* extraction only: a cached profile was merged when it was made,
         # and doing it twice would append the same requirements to itself.

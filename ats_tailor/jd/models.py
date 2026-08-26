@@ -122,9 +122,18 @@ class Gates(BaseModel):
 class RequirementSpec(BaseModel):
     """One atomic thing the posting asks for.
 
-    ``terms`` are the posting's own technology words, normalised through the
-    index alias map where they are known; an unknown term is *kept*, because a
-    requirement the index cannot cover still has to be visible as one.
+    ``terms`` are the index's canonical vocabulary wherever the posting names
+    something the index knows (:func:`extract.normalise_term` finds them inside
+    whatever phrase the extractor wrote); a phrase no index form appears in is
+    *kept*, because a requirement the index cannot cover still has to be visible
+    as one.
+
+    ``surface`` is the posting's own spelling of the same things — "Azure
+    Kubernetes Services (AKS)" where ``terms`` says ``AKS``. Nothing matches
+    against it: it exists so that asking a model for canonical terms does not
+    throw away the words the posting actually used, which the report and the
+    alias-aligned skills line want back. It is optional everywhere, including in
+    a model's answer and in a row written before it existed.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -135,6 +144,7 @@ class RequirementSpec(BaseModel):
     category: str | None = None
     weight: float = 1.0
     terms: list[str] = Field(default_factory=list)
+    surface: list[str] = Field(default_factory=list)
 
     @field_validator("text", mode="before")
     @classmethod
@@ -166,7 +176,7 @@ class RequirementSpec(BaseModel):
             return 1.0
         return max(0.0, weight)
 
-    @field_validator("terms", mode="before")
+    @field_validator("terms", "surface", mode="before")
     @classmethod
     def _clean_terms(cls, value):
         if value is None:

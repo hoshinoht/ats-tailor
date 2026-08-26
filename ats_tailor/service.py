@@ -971,7 +971,7 @@ class Service:
 
     # ── Requirements ─────────────────────────────────────────────────────────
     def _provider(self, name: str | None = None, profile: JDProfile | None = None):
-        from .jd.extract import term_alias_map
+        from .jd.extract import index_vocabulary, term_alias_map
         from .llm.provider import get_provider
 
         requested = str(name or self.provider_name or "none").strip().lower()
@@ -983,7 +983,8 @@ class Service:
             )
         try:
             return get_provider(requested, alias_map=term_alias_map(self.index),
-                                profile=profile, quiet=True)
+                                profile=profile, quiet=True,
+                                vocabulary=index_vocabulary(self.index))
         except ValueError as exc:
             raise ServiceError("provider_unavailable", str(exc)) from exc
 
