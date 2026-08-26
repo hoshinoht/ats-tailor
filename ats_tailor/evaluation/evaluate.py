@@ -31,7 +31,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from ats_match import kendall_tau, precision_at_k
 
@@ -171,6 +171,7 @@ def evaluate_one(
     engine: str = "v1",
     provider: str = "none",
     reextract: bool = False,
+    variants: bool = True,
 ) -> dict[str, Any]:
     """Run the pipeline for one label, compile, check, and score it."""
     from ..engine.legacy.tailor import load_index_for_terms, run as run_pipeline
@@ -191,6 +192,8 @@ def evaluate_one(
         argv += ["--provider", provider]
         if reextract:
             argv.append("--reextract")
+        if not variants:
+            argv.append("--no-variants")
 
     log = io.StringIO()
     try:
@@ -287,6 +290,8 @@ def evaluate(
     engine: str = "v1",
     provider: str = "none",
     reextract: bool = False,
+    variants: bool = True,
+    variants_report: bool = False,
 ) -> dict[str, Any]:
     index_dir = Path(index_dir).resolve()
     out_dir = Path(out_dir).resolve()
@@ -300,6 +305,7 @@ def evaluate(
     digest, values = config_fingerprint(index_dir, engine, provider)
     runs = []
     skipped: list[str] = []
+    paths: dict[str, Path] = {}
     for i, (slug, label) in enumerate(labels.items(), start=1):
         jd_path = find_jd(label, slug, jd_dir)
         if jd_path is None:
@@ -313,24 +319,250 @@ def evaluate(
         runs.append(evaluate_one(
             slug, label, jd_path, index_dir, profile,
             out_dir / "runs" / slug, llm=llm, rerank=rerank, engine=engine,
-            provider=provider, reextract=reextract,
+            provider=provider, reextract=reextract, variants=variants,
         ))
+        paths[slug] = jd_path
 
     payload = {
         "config_hash": digest,
         "config": values,
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "options": {"llm": llm, "rerank": rerank, "engine": engine,
-                    "provider": provider, "prompt_version": config.PROMPT_VERSION},
+                    "provider": provider, "prompt_version": config.PROMPT_VERSION,
+                    "variants": variants},
         "runs": runs,
         "skipped": skipped,
         "means": means(runs),
     }
+    section = variants_section(
+        index_dir, labels, paths, profile, out_dir, runs,
+        engine=engine, provider=provider, llm=llm, rerank=rerank,
+        measure=bool(variants_report and variants),
+    )
+    if section:
+        payload["variants"] = section
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{digest[:12]}.json"
     path.write_text(json.dumps(payload, indent=2) + "\n")
     payload["path"] = str(path)
     return payload
+
+
+# ── Variants (Phase 5) ────────────────────────────────────────────────────────
+#: Metrics the variants report compares with and without the variants on.
+VARIANT_METRICS = ("must_coverage", "context_rate", "nice_coverage")
+
+
+def index_variants(index_dir: str | Path) -> list[dict[str, str]]:
+    """``[{bullet_id, archetype, text}]`` for every variant in the index."""
+    from ..index.io import detect_layout, load_index_v2
+
+    index_dir = Path(index_dir)
+    if detect_layout(index_dir) != "v2":
+        return []
+    try:
+        index = load_index_v2(index_dir)
+    except (OSError, ValueError):
+        return []
+    rows = [
+        {"bullet_id": bullet.id, "archetype": str(key), "text": str(text)}
+        for item in [*index.roles, *index.projects]
+        for bullet in item.bullets
+        for key, text in (bullet.variants or {}).items()
+    ]
+    rows += [
+        {"bullet_id": "summaries", "archetype": str(key), "text": str(text)}
+        for key, text in (index.summaries.variants or {}).items()
+    ]
+    return rows
+
+
+def guardrail_stats(index_dir: str | Path) -> dict[str, Any]:
+    """Pass rate of every proposal the store has ever been shown.
+
+    Reported next to the variants because the two answer different halves of
+    one question: the pass rate says how much of what was proposed was
+    honest, and the deltas say whether the honest part was worth printing.
+    """
+    from ..runs.store import Store, store_path
+
+    path = store_path(index_dir)
+    if not Path(path).exists():
+        return {}
+    store = Store(path)
+    try:
+        proposals = store.list_proposals()
+    except Exception:
+        return {}
+    finally:
+        store.close()
+    if not proposals:
+        return {"proposals": 0}
+    passed = sum(1 for p in proposals if p.ok)
+    by_status: dict[str, int] = {}
+    for proposal in proposals:
+        by_status[proposal.status] = by_status.get(proposal.status, 0) + 1
+    return {
+        "proposals": len(proposals),
+        "passed": passed,
+        "pass_rate": round(passed / len(proposals), 4),
+        "by_status": by_status,
+    }
+
+
+def variants_section(
+    index_dir: Path,
+    labels: Mapping[str, Label],
+    jd_paths: Mapping[str, Path],
+    profile: Path,
+    out_dir: Path,
+    runs: Sequence[dict],
+    engine: str = "v2",
+    provider: str = "none",
+    llm: bool = False,
+    rerank: bool = False,
+    measure: bool = True,
+) -> dict[str, Any]:
+    """What the index's variants are worth, per bullet, on their own archetype.
+
+    A variant only ever applies to postings whose archetype it is written for,
+    so those are the only postings it can be measured on. Each such posting is
+    run a second time with ``--no-variants`` and the difference in must
+    coverage and context rate is the variant's effect *on that posting*.
+
+    The attribution is per archetype, not per bullet: two variants for one
+    archetype are on or off together, and separating them would cost a sweep
+    per bullet. A delta is therefore recorded against every variant whose
+    bullet the run actually selected, and against none of the ones it did not
+    — a variant the solver never reached for did not move the number, whatever
+    else changed.
+
+    ``measure`` off (the default sweep) lists the variants and the guardrail
+    pass rate without running anything twice.
+    """
+    variants = index_variants(index_dir)
+    guardrail = guardrail_stats(index_dir)
+    if not variants and not guardrail.get("proposals"):
+        return {}
+
+    section: dict[str, Any] = {
+        "variants": variants,
+        "guardrail": guardrail,
+        "measured": bool(measure and variants),
+    }
+    if not section["measured"]:
+        return section
+
+    by_slug = {str(run.get("slug")): run for run in runs}
+    # The archetype a run resolved and the variants it used are read from the
+    # run's own `selection.json` rather than added to the eval record: a sweep
+    # of an index with no variants has to stay comparable, field for field,
+    # with every baseline taken before this phase existed.
+    written = {
+        slug: _selection_json(out_dir / "runs" / slug)
+        for slug in by_slug
+    }
+    archetypes = {row["archetype"].strip().lower() for row in variants}
+    rows: dict[tuple[str, str], dict[str, Any]] = {
+        (row["bullet_id"], row["archetype"]): {
+            "bullet_id": row["bullet_id"], "archetype": row["archetype"],
+            "jds": [],
+        }
+        for row in variants
+    }
+
+    for slug, run in by_slug.items():
+        archetype = str(written.get(slug, {}).get("archetype") or "").strip().lower()
+        if not archetype or archetype not in archetypes:
+            continue
+        label, jd_path = labels.get(slug), jd_paths.get(slug)
+        if label is None or jd_path is None:
+            continue
+        print(f"[variants] {slug}: re-running without variants", flush=True)
+        without = evaluate_one(
+            slug, label, jd_path, index_dir, profile,
+            out_dir / "runs" / f"{slug}-no-variants", llm=llm, rerank=rerank,
+            engine=engine, provider=provider, variants=False,
+        )
+        used = {str(v.get("bullet_id")): v
+                for v in written.get(slug, {}).get("variants") or []}
+        deltas = {
+            metric: _delta(run.get(metric), without.get(metric))
+            for metric in VARIANT_METRICS
+        }
+        for (bullet_id, key), row in rows.items():
+            if key.strip().lower() != archetype:
+                continue
+            row["jds"].append({
+                "slug": slug,
+                "used": bullet_id in used or bullet_id == "summaries",
+                **{f"{metric}_delta": deltas[metric] for metric in VARIANT_METRICS},
+            })
+
+    for row in rows.values():
+        scored = [jd for jd in row["jds"] if jd["used"]]
+        for metric in VARIANT_METRICS:
+            values = [jd[f"{metric}_delta"] for jd in scored
+                      if jd[f"{metric}_delta"] is not None]
+            row[f"{metric}_delta_mean"] = (
+                round(sum(values) / len(values), 4) if values else None)
+    section["bullets"] = list(rows.values())
+    return section
+
+
+def _selection_json(run_dir: Path) -> dict[str, Any]:
+    """One run's ``selection.json``, or ``{}`` when it never got that far."""
+    path = Path(run_dir) / "selection.json"
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _delta(after: Any, before: Any) -> float | None:
+    try:
+        return round(float(after) - float(before), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def render_variants(section: Mapping[str, Any]) -> str:
+    """The variants section as the table ``eval`` prints under the metrics."""
+    if not section:
+        return ""
+    lines = ["variants"]
+    guardrail = section.get("guardrail") or {}
+    if guardrail.get("proposals"):
+        lines.append(
+            f"  guardrail   {guardrail['passed']}/{guardrail['proposals']} "
+            f"proposals passed ({guardrail.get('pass_rate', 0):.0%}); "
+            + ", ".join(f"{k} {v}" for k, v in
+                        sorted((guardrail.get("by_status") or {}).items())))
+    else:
+        lines.append("  guardrail   no proposals recorded")
+    listed = section.get("variants") or []
+    if not listed:
+        lines.append("  index       no variants")
+        return "\n".join(lines)
+    lines.append(f"  index       {len(listed)} variant(s)")
+    if not section.get("measured"):
+        for row in listed:
+            lines.append(f"    {row['bullet_id']:<28} {row['archetype']}")
+        lines.append("  (run with --variants-report to measure them)")
+        return "\n".join(lines)
+    lines += ["", "  bullet                        archetype            "
+                  "must     ctx      on"]
+    for row in section.get("bullets") or []:
+        scored = [jd for jd in row.get("jds") or [] if jd.get("used")]
+        must = row.get("must_coverage_delta_mean")
+        ctx = row.get("context_rate_delta_mean")
+        lines.append(
+            f"    {row['bullet_id']:<28} {row['archetype']:<20} "
+            f"{'—' if must is None else f'{must:+.3f}':<8} "
+            f"{'—' if ctx is None else f'{ctx:+.3f}':<8} "
+            f"{len(scored)} JD(s)")
+    return "\n".join(lines)
 
 
 def means(runs: Sequence[dict]) -> dict[str, float | None]:

@@ -1,0 +1,34 @@
+You are tightening the one-sentence Summary at the top of a résumé for a
+particular application. Answer with the rewritten summary and nothing else: one
+line, no quotes, no explanation.
+
+## The contract
+
+The summary may only restate what the résumé already says. Every one of these
+is checked automatically after you answer, and a rewrite that breaks one is
+thrown away:
+
+- **Introduce no claim.** Every technology, role and achievement you name must
+  already appear in the material below.
+- **Invent no number.** No figure that is not in the material below.
+- No first person ("I", "we", "my", "our"). One sentence, at most
+  {{ max_chars }} characters.
+- Keep it a description of the candidate, not a promise to the employer.
+
+## The target
+
+{% if archetype %}Archetype: {{ archetype }}
+{% endif %}{% if title %}Job title: {{ title }}
+{% endif %}
+## The current summary
+
+<<<SUMMARY
+{{ summary }}
+SUMMARY>>>
+
+## Everything the résumé says (nothing else may be claimed)
+
+{% for line in allowed %}- {{ line }}
+{% endfor %}
+
+Answer with the rewritten summary on one line.

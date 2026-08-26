@@ -162,6 +162,111 @@ class ComparePairDialog(Dialog):
         self.dismiss((self.first, path))
 
 
+class VariantDialog(Dialog):
+    """One proposed rephrasing, its guardrail verdict, and the decision.
+
+    ``a`` accepts (which writes the index), ``d`` rejects, ``e`` opens the text
+    for editing and ``ctrl+s`` sends the edit back to the guardrail. A proposal
+    the guardrail refused cannot be accepted from here at all — the panel says
+    which rules it broke and offers the edit instead, because the whole point
+    of the phase is that the check is not a thing a tired person can skip.
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "close"),
+        Binding("a", "accept", "accept"),
+        Binding("d", "reject", "reject"),
+        Binding("e", "edit", "edit"),
+        Binding("ctrl+s", "recheck", "re-check"),
+    ]
+
+    def __init__(self, proposal, *, subtitle: str = ""):
+        super().__init__()
+        self.proposal = proposal
+        self.subtitle = subtitle
+        #: The verdict as it was last painted. Textual's ``Static`` does not
+        #: hand its content back, and what the panel *says* about a refusal is
+        #: the part of this screen worth asserting on.
+        self.verdict_message = ""
+
+    def compose(self) -> ComposeResult:
+        proposal = self.proposal
+        verdict = proposal.guardrail
+        with Vertical(classes="dialog dialog-wide", id="variant-dialog"):
+            yield Label(
+                f"Variant for {proposal.bullet_id} · {proposal.archetype}",
+                classes="dialog-title")
+            if self.subtitle:
+                yield Static(self.subtitle, classes="dialog-subtitle")
+            yield Static(f"[dim]index:[/dim] {_markup_safe(proposal.source)}",
+                         id="variant-source")
+            yield TextArea(proposal.text, id="variant-text", soft_wrap=True,
+                           read_only=True)
+            yield Static(self._show_verdict(verdict), id="variant-verdict")
+            if verdict is not None and verdict.diff:
+                yield Static(f"[dim]{_markup_safe(verdict.diff)}[/dim]",
+                             id="variant-diff")
+            yield Static(
+                "[b]a[/b] accept (writes the index)   [b]d[/b] reject   "
+                "[b]e[/b] edit   [b]ctrl+s[/b] re-check   [b]esc[/b] close",
+                classes="dialog-subtitle")
+
+    def _show_verdict(self, verdict, extra: str = "") -> str:
+        """Render the verdict, remember it, and (when mounted) repaint it."""
+        text = self._verdict_text(verdict) + extra
+        self.verdict_message = text
+        if self.is_mounted:
+            self.query_one("#variant-verdict", Static).update(text)
+        return text
+
+    @staticmethod
+    def _verdict_text(verdict) -> str:
+        if verdict is None:
+            return "[yellow]guardrail: unchecked[/yellow]"
+        if verdict.ok:
+            return "[green]guardrail: ok[/green]"
+        lines = [f"[red]guardrail: {verdict.summary()}[/red]"]
+        lines += [f"  [red]✗[/red] {v.rule}: {_markup_safe(v.detail)}"
+                  for v in verdict.violations]
+        return "\n".join(lines)
+
+    def action_accept(self) -> None:
+        if self.query_one("#variant-text", TextArea).read_only is False:
+            return  # editing: a keystroke is a character, not a decision
+        verdict = self.proposal.guardrail
+        if not self.proposal.id or verdict is None or not verdict.ok:
+            self._show_verdict(
+                verdict, "\n[b]this cannot be accepted — press e to fix it[/b]")
+            return
+        self.dismiss(("accept", self.proposal.id))
+
+    def action_reject(self) -> None:
+        if self.query_one("#variant-text", TextArea).read_only is False:
+            return
+        if not self.proposal.id:
+            self.dismiss(None)  # nothing was ever proposed to reject
+            return
+        self.dismiss(("reject", self.proposal.id))
+
+    def action_edit(self) -> None:
+        area = self.query_one("#variant-text", TextArea)
+        area.read_only = False
+        area.focus()
+        self.verdict_message = (
+            "editing — ctrl+s re-checks it against the source bullet")
+        self.query_one("#variant-verdict", Static).update(
+            f"[yellow]{self.verdict_message}[/yellow]")
+
+    def action_recheck(self) -> None:
+        text = self.query_one("#variant-text", TextArea).text.strip()
+        self.dismiss(("recheck", text))
+
+
+def _markup_safe(text: str) -> str:
+    """Rich markup is a formatting language; a proposal is data."""
+    return str(text or "").replace("[", r"\[")
+
+
 class ImageDialog(Dialog):
     """Page 1 of the PDF, rastered inline where the terminal can show it."""
 
@@ -200,6 +305,9 @@ HELP_TEXT = """\
   p / x   pin / exclude the item under the cursor
   P / X   pin / exclude the bullet under the cursor
   w       reweight the requirement under the cursor (0.25 · 0.5 · 1 · 1.5)
+  v       propose wording for the bullet under the cursor, for this posting's
+          archetype: a accepts (writes the index), d rejects, e edits, ctrl+s
+          re-checks the edit against the guardrail
   r       re-run with the overrides as they now stand
   c       compile and check     o  open the PDF in the system viewer
   i       inline raster of page 1 (needs a terminal that can show images)

@@ -444,11 +444,12 @@ def test_compiling_a_run_needs_a_run(service):
     assert caught.value.code == "not_found"
 
 
-def test_variant_proposals_are_phase_five(service):
+def test_variant_proposals_need_a_provider_or_a_text(service):
+    """Phase 5 replaced 4a's ``not_implemented`` stub. The rest is test_phase5."""
     with pytest.raises(ServiceError) as caught:
         service.propose_variant("acme-swe.b1", "cloud")
-    assert caught.value.code == "not_implemented"
-    assert "index_put" in caught.value.message
+    assert caught.value.code == "provider_unavailable"
+    assert "text" in caught.value.message
 
 
 # ── the MCP layer ────────────────────────────────────────────────────────────
@@ -655,6 +656,7 @@ def test_no_tool_ever_raises_however_it_is_called(tools):
         "profile_json": "{", "status": "invented", "days": -1, "engine": "v3",
         "provider": "nonesuch", "section": "everything", "bullet_id": "x",
         "archetype": "y", "only": ["nothing"], "out_dir": "/etc",
+        "proposal_id": "no-such-proposal", "reason": "",
     }
     import inspect
 
@@ -687,10 +689,11 @@ def test_the_tools_answer_through_the_sdks_own_registry(service):
     assert validated["ok"] and validated["errors"] == []
 
 
-def test_the_stub_says_what_to_do_instead(tools):
+def test_a_variant_proposal_without_wording_needs_a_model(tools):
+    """4a's stub is gone; ``tests/test_phase5.py`` covers what replaced it."""
     payload = tools.ats_propose_variant("acme-swe.b1", "cloud")
     assert payload["ok"] is False
-    assert payload["error"]["code"] == "not_implemented"
+    assert payload["error"]["code"] == "provider_unavailable"
 
 
 def test_pagination_is_total_safe():

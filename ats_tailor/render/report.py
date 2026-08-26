@@ -235,7 +235,7 @@ def _truncate(text, width=70):
 def generate_v2_report(
     company, role, requirements, claims, selection, matrix, skill_lines,
     certs=None, selected_certs=None, gaps=None, budget=None, pages=None,
-    attempts=1, gap_threshold=0.3, profile=None,
+    attempts=1, gap_threshold=0.3, profile=None, variants=None,
 ):
     """The v2 match report: what was asked for, what was shown, and why.
 
@@ -327,6 +327,21 @@ def generate_v2_report(
                 f"| {requirement.id} | {requirement.kind} | "
                 f"{_md_cell(_truncate(requirement.text, 90))} |"
             )
+
+    if variants:
+        lines += ["", "## Phrasing variants used", "",
+                  "Accepted alternate wording for this posting's archetype. The "
+                  "claim is the same claim; only the sentence differs, and the "
+                  "guardrail checked that it still says the same thing.", "",
+                  "| bullet | archetype | guardrail | text |", "|---|---|---|---|"]
+        for row in variants:
+            verdict = row.get("guardrail") or {}
+            state = "ok" if verdict.get("ok") else (
+                "—" if not verdict else "FAILED")
+            lines.append(
+                f"| {_md_cell(str(row.get('bullet_id', '')))} | "
+                f"{_md_cell(str(row.get('archetype', '')))} | {state} | "
+                f"{_md_cell(_truncate(str(row.get('text', '')), 90))} |")
 
     if gaps:
         lines += ["", "## Index gaps", "",

@@ -48,6 +48,11 @@ class RunResult:
     provider: str | None = None
     #: Whether the profile came out of the store rather than being read again.
     provider_cached: bool = False
+    #: v2 only — the accepted phrasing variants this run used, one entry per
+    #: bullet that reached the page in wording other than its own, with the
+    #: guardrail verdict that let it in. Empty (and omitted from ``to_dict``)
+    #: for an index with no variants, which is every index before Phase 5.
+    variants: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -76,4 +81,6 @@ class RunResult:
             payload["archetype"] = self.archetype
             payload["provider"] = self.provider
             payload["provider_cached"] = self.provider_cached
+            if self.variants:
+                payload["variants"] = self.variants
         return payload

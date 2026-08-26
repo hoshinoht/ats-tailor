@@ -23,6 +23,7 @@ from ats_match.types import Constraints
 from .. import config
 from .adapt import (
     PAGE_TERMS_ATTR,
+    VARIANT_ATTR,
     alias_map,
     claims_from_index,
     header_claims,
@@ -114,6 +115,10 @@ class V2Options:
     target_title: bool = config.TARGET_TITLE
     #: Languages the candidate declares, for the language gate.
     languages: Sequence[str] = ()
+    #: Use the index's accepted phrasing variants for the posting's archetype.
+    #: Off is what ``eval --no-variants`` measures against: the same run with
+    #: every bullet in its own words.
+    use_variants: bool = True
 
 
 def tailor_v2(
@@ -181,7 +186,15 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
     text_edits = text_map(overrides)
     for warning in metric_warnings(index, text_edits):
         say(f"  Warning: {warning}")
-    claims = claims_from_index(index, text_overrides=text_edits)
+    archetype = jd_profile.archetype if options.use_variants else None
+    claims = claims_from_index(index, text_overrides=text_edits, archetype=archetype)
+    used_variants = {
+        claim.id: str(claim.attrs.get(VARIANT_ATTR))
+        for claim in claims if claim.attrs.get(VARIANT_ATTR)
+    }
+    if used_variants:
+        say(f"  Variants: {len(used_variants)} bullet(s) phrased for "
+            f"{archetype!r}: {', '.join(sorted(used_variants))}")
     if config.HEADER_CLAIMS:
         claims += header_claims(index)
     claims += skill_claims(index, requirements)
@@ -219,7 +232,7 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
     education = legacy_exp["education"][:2]
     certs = legacy_certs["certifications"]
     selected_certs = select_certifications(certs, _cert_scores(embedder, jd_text, certs, store))
-    summary_data = _summary_variant(summary_data, index, jd_profile.archetype, say)
+    summary_data = _summary_variant(summary_data, index, archetype, say)
     summary_data = _apply_summary(summary_data, overrides.summary)
     # The posting's own spelling, for the skills line only: bullets are the
     # user's sentences and are never rewritten here (Phase 5 owns variants).
@@ -257,7 +270,7 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
         )
         exp_ctx, proj_ctx, skill_lines = render_context(
             selection, index, claims, text_overrides=text_edits,
-            skill_labels=skill_labels)
+            skill_labels=skill_labels, archetype=archetype)
         resume_tex = render_resume(
             company=company, role=role, profile=profile, education=education,
             experience=exp_ctx, projects=proj_ctx, skill_lines=skill_lines,
@@ -296,6 +309,7 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
 
     selection = chosen["selection"]
     exp_ctx, proj_ctx, skill_lines = chosen["exp"], chosen["proj"], chosen["skills"]
+    variants = _variants_used(selection, used_variants, claims, store)
 
     # ── 6. artefacts ──
     if options.write_prompt:
@@ -307,7 +321,7 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
         company, role, requirements, claims, selection, matrix, skill_lines,
         certs=certs, selected_certs=selected_certs, gaps=gaps,
         budget=chosen["budget"], pages=chosen["pages"], attempts=len(attempts),
-        profile=jd_profile,
+        profile=jd_profile, variants=variants,
     ))
     generate_requirement_visualization(
         out_dir, company, role, requirements, selection.coverage, GAP_THRESHOLD
@@ -342,6 +356,7 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
         archetype=jd_profile.archetype,
         provider=jd_profile.provider,
         provider_cached=jd_profile.cached,
+        variants=variants,
     )
     (out_dir / "selection.json").write_text(json.dumps(result.to_dict(), indent=2) + "\n")
     say(f"\nDone! Output in: {out_dir}")
@@ -358,8 +373,45 @@ def _reranker(options: V2Options, provider):
     return load_reranker(mode, provider)
 
 
+def _variants_used(selection, used_variants, claims, store) -> list[dict[str, Any]]:
+    """The variants that reached the page, with the verdict that let them.
+
+    The guardrail report is read back from the store rather than recomputed:
+    what belongs in a run record is the decision a human actually accepted, not
+    a re-judgement made against whatever the index says today.
+    """
+    if not used_variants:
+        return []
+    texts = {claim.id: claim.text for claim in claims}
+    rows: list[dict[str, Any]] = []
+    for claim_id in selection.claim_ids:
+        archetype = used_variants.get(claim_id)
+        if not archetype:
+            continue
+        row: dict[str, Any] = {
+            "bullet_id": claim_id,
+            "archetype": archetype,
+            "text": texts.get(claim_id, ""),
+        }
+        try:
+            accepted = store.accepted_variant(claim_id, archetype)
+        except Exception:  # a store without the table is not a failed run
+            accepted = None
+        if accepted is not None:
+            row["proposal_id"] = accepted.id
+            row["guardrail"] = accepted.guardrail
+        rows.append(row)
+    return rows
+
+
 def _summary_variant(summary_data: dict | None, index: Index, archetype, say):
-    """``summaries.variants[archetype]`` when the index has one for it."""
+    """``summaries.variants[archetype]`` when the index has one for it.
+
+    ``archetype`` is ``None`` under ``--no-variants``, which turns this off
+    with the bullet variants: since Phase 5 a summary variant is an accepted
+    proposal like any other, and a flag that measured the page without the
+    bullets' variants but with the summary's would be measuring neither state.
+    """
     variants = getattr(index.summaries, "variants", {}) or {}
     if not summary_data or not archetype:
         return summary_data

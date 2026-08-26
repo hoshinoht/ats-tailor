@@ -28,6 +28,7 @@ from ..service import (
     EvalBaseline,
     ItemUsage,
     OverridesPatch,
+    ProposalInfo,
     RunRecord,
     Service,
     ServiceError,
@@ -38,6 +39,7 @@ __all__ = [
     "Actions",
     "ApplicationRow",
     "Outcome",
+    "ProposalInfo",
     "RequirementRow",
     "SelectionNode",
     "TailorView",
@@ -168,6 +170,7 @@ class TailorView:
     context: float | None
     gates: list[tuple[str, str]]
     gates_summary: str
+    archetype: str
     requirements: list[RequirementRow]
     sections: list[SelectionNode]
     preview: str
@@ -315,6 +318,7 @@ class Actions:
             context=_number(coverage.get("context_rate")),
             gates=gate_flags(data.get("gates") or {}),
             gates_summary=_gates_summary(data.get("gates") or {}),
+            archetype=str(data.get("archetype") or ""),
             requirements=requirements,
             sections=_selection_tree(pack, gains),
             preview=preview,
@@ -390,6 +394,48 @@ class Actions:
         if not rendered:
             raise ServiceError("not_found", "pdftoppm wrote no image")
         return rendered[0]
+
+    # ── variants ──
+    def propose_variant(
+        self, run_id: str, bullet_id: str, text: str | None = None
+    ) -> ProposalInfo:
+        """Propose wording for one bullet, aimed at this run's archetype.
+
+        The requirements the prompt is given are the ones the solver actually
+        picked this bullet *for*, read out of the run's own trace: aligning a
+        sentence to a requirement it was never chosen to answer is how a
+        rephrase turns into an invention.
+        """
+        record = self.service.get_run(run_id)
+        data = record.data or {}
+        archetype = str(data.get("archetype") or "").strip()
+        if not archetype:
+            raise ServiceError(
+                "invalid_input",
+                f"{run_id} has no archetype, so there is nothing to phrase for")
+        covered = [
+            str(pair[0])
+            for step in (data.get("selection") or {}).get("trace") or []
+            if str(step.get("claim_id")) == bullet_id
+            for pair in step.get("covered") or []
+            if pair
+        ]
+        slug = Path(str(data.get("jd_path") or "")).stem or None
+        return self.service.propose_variant(
+            bullet_id, archetype, text, requirement_ids=covered,
+            jd_slug=slug, provenance="tui" if text else None,
+        )
+
+    def accept_proposal(self, proposal_id: str) -> str:
+        proposal = self.service.accept_proposal(proposal_id)
+        return f"accepted {proposal.id} into {proposal.path}"
+
+    def reject_proposal(self, proposal_id: str, reason: str | None = None) -> str:
+        proposal = self.service.reject_proposal(proposal_id, reason)
+        return f"rejected {proposal.id}"
+
+    def proposals(self, status: str | None = None) -> list[ProposalInfo]:
+        return self.service.proposals(status=status)
 
     def labels_from_run(self, run_id: str) -> str:
         update = self.service.labels_from_run(run_id)

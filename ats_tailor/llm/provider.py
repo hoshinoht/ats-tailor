@@ -20,8 +20,10 @@ every purpose this interface has.
 
 from __future__ import annotations
 
+import re
 import sys
-from typing import Protocol, runtime_checkable
+from pathlib import Path
+from typing import Protocol, Sequence, runtime_checkable
 
 from .. import config
 from ..jd.models import JDProfile
@@ -33,6 +35,91 @@ EXTRACT_MAX_TOKENS = 2048
 #: Context window an extraction needs: the prompt carries the whole posting.
 EXTRACT_NUM_CTX = 16384
 RERANK_MAX_TOKENS = 256
+#: One line of prose, with room to be too long so the guardrail can say so
+#: rather than the token limit truncating the answer into a passing one.
+VARIANT_MAX_TOKENS = 256
+
+PKG_DIR = Path(__file__).resolve().parent
+VARIANT_PROMPT = "prompt_variant.md.j2"
+SUMMARY_PROMPT = "prompt_summary.md.j2"
+
+
+def render_variant_prompt(
+    bullet: str,
+    archetype: str | None = None,
+    requirements: Sequence[str] = (),
+    metrics: Sequence[str] = (),
+    said: Sequence[str] = (),
+    allowed: Sequence[str] = (),
+    max_chars: int | None = None,
+) -> str:
+    """The rephrasing prompt: the guardrail's rules, verbatim, then the bullet.
+
+    The rules are in the prompt *and* enforced after the answer. Telling the
+    model what will be checked is what makes a local 8B model usable here at
+    all; checking afterwards is what makes it safe when it ignores them.
+    """
+    from ..index.models import MAX_BULLET_CHARS
+
+    return _template(VARIANT_PROMPT).render(
+        bullet=str(bullet or "").strip(),
+        archetype=str(archetype or "").strip() or None,
+        requirements=[str(r).strip() for r in requirements if str(r).strip()],
+        metrics=[str(m).strip() for m in metrics if str(m).strip()],
+        said=[str(s).strip() for s in said if str(s).strip()],
+        allowed=[str(a).strip() for a in allowed if str(a).strip()],
+        max_chars=int(max_chars or MAX_BULLET_CHARS),
+    )
+
+
+def render_summary_prompt(
+    summary: str,
+    archetype: str | None = None,
+    title: str | None = None,
+    allowed: Sequence[str] = (),
+    max_chars: int = 320,
+) -> str:
+    """The summary-polish prompt: the same contract, over the whole résumé."""
+    return _template(SUMMARY_PROMPT).render(
+        summary=str(summary or "").strip(),
+        archetype=str(archetype or "").strip() or None,
+        title=str(title or "").strip() or None,
+        allowed=[str(a).strip() for a in allowed if str(a).strip()],
+        max_chars=int(max_chars),
+    )
+
+
+def _template(name: str):
+    from jinja2 import Environment, FileSystemLoader
+
+    return Environment(
+        loader=FileSystemLoader(str(PKG_DIR)), autoescape=False
+    ).get_template(name)
+
+
+def one_line(raw: str | None) -> str | None:
+    """The model's answer as a single unquoted line, or ``None`` if it said nothing.
+
+    Local models answer a "one line" instruction with a preamble, a bullet
+    marker, a code fence, or the line in quotes about as often as they answer
+    with the line. All four are stripped here rather than in the guardrail,
+    which judges wording and should not be in the business of parsing chat.
+    """
+    if raw is None:
+        return None
+    text = str(raw)
+    text = re.sub(r"<think>.*?</think>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    text = text.replace("```", "\n")
+    for line in text.splitlines():
+        candidate = line.strip().lstrip("-*•").strip()
+        if not candidate or candidate.endswith(":"):
+            continue
+        if candidate.lower().startswith(("here", "sure", "rewritten", "answer")):
+            continue
+        candidate = candidate.strip("\"'`")
+        if candidate:
+            return candidate.strip()
+    return None
 
 
 @runtime_checkable
@@ -52,9 +139,23 @@ class Provider(Protocol):
         ...
 
     def propose_variant(
-        self, bullet: str, archetype: str, requirements: list[str]
+        self, bullet: str, archetype: str, requirements: list[str], **context
     ) -> str | None:
-        """Phase 5. Every provider returns ``None`` today."""
+        """Alternate wording for one bullet, or ``None``.
+
+        ``context`` carries what the guardrail will check — ``metrics``,
+        ``said`` (technologies the source names) and ``allowed`` (what the item
+        may name) — so the prompt can state the rules before the answer is
+        judged by them. A provider that ignores it is still correct; the
+        guardrail is the enforcement.
+        """
+        ...
+
+    def propose_summary(
+        self, summary: str, archetype: str | None, title: str | None,
+        allowed: list[str],
+    ) -> str | None:
+        """A tightened Summary built only from ``allowed``, or ``None``."""
         ...
 
 
@@ -72,7 +173,10 @@ class NoneProvider:
     def rerank(self, requirement, claims):
         return None
 
-    def propose_variant(self, bullet, archetype, requirements):
+    def propose_variant(self, bullet, archetype, requirements, **context):
+        return None
+
+    def propose_summary(self, summary, archetype, title, allowed):
         return None
 
 
@@ -105,7 +209,12 @@ class ExternalProvider:
     def rerank(self, requirement, claims):
         return None
 
-    def propose_variant(self, bullet, archetype, requirements):
+    def propose_variant(self, bullet, archetype, requirements, **context):
+        # The agent *is* the model: it submits the wording through the service
+        # (`propose_variant(text=…)`), and there is nothing to ask here.
+        return None
+
+    def propose_summary(self, summary, archetype, title, allowed):
         return None
 
 
@@ -177,8 +286,30 @@ class _ModelProvider:
         except (TypeError, ValueError):
             return None
 
-    def propose_variant(self, bullet, archetype, requirements):
-        return None  # Phase 5
+    def propose_variant(self, bullet, archetype, requirements, **context):
+        prompt = render_variant_prompt(
+            bullet, archetype, requirements,
+            metrics=context.get("metrics") or (),
+            said=context.get("said") or (),
+            allowed=context.get("allowed") or (),
+        )
+        try:
+            raw = self.generate(prompt, "variant", VARIANT_MAX_TOKENS)
+        except Exception as exc:
+            print(f"  Warning: {self.name} variant proposal failed ({exc})",
+                  file=sys.stderr)
+            return None
+        return one_line(raw)
+
+    def propose_summary(self, summary, archetype, title, allowed):
+        prompt = render_summary_prompt(summary, archetype, title, allowed)
+        try:
+            raw = self.generate(prompt, "summary", VARIANT_MAX_TOKENS)
+        except Exception as exc:
+            print(f"  Warning: {self.name} summary proposal failed ({exc})",
+                  file=sys.stderr)
+            return None
+        return one_line(raw)
 
 
 class OllamaProvider(_ModelProvider):

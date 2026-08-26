@@ -23,7 +23,7 @@ from textual.widgets import DataTable, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from .actions import WEIGHTS, SelectionNode, TailorView
-from .modals import ChoiceDialog, ImageDialog
+from .modals import ChoiceDialog, ImageDialog, VariantDialog
 
 BAND_STYLES = {"covered": "green", "partial": "yellow", "missing": "red"}
 
@@ -37,6 +37,7 @@ class TailorScreen(Vertical):
         Binding("P", "pin_bullet", "pin bullet"),
         Binding("X", "exclude_bullet", "exclude bullet"),
         Binding("w", "reweight", "reweight"),
+        Binding("v", "variant", "variant"),
         Binding("r", "rerun", "re-run"),
         Binding("c", "check", "compile+check"),
         Binding("o", "open_pdf", "open PDF"),
@@ -243,6 +244,78 @@ class TailorScreen(Vertical):
             chosen,
         )
 
+    # ── variants ──
+    def action_variant(self) -> None:
+        """Propose wording for the bullet under the cursor, for this archetype."""
+        bullet_id, run_id = self._bullet_under_cursor(), self.run_id
+        if not bullet_id or not run_id:
+            self.app.notify("put the cursor on a bullet in the right pane",
+                            severity="warning")
+            return
+        self._propose(run_id, bullet_id, None)
+
+    def _propose(self, run_id: str, bullet_id: str, text: str | None) -> None:
+        self.app.run_task(
+            f"proposing wording for {bullet_id}",
+            lambda: self.app.actions.propose_variant(run_id, bullet_id, text),
+            then=lambda proposal: self._show_variant(run_id, bullet_id, proposal),
+            on_error=lambda outcome: self._no_proposal(run_id, bullet_id, outcome),
+        )
+
+    def _no_proposal(self, run_id: str, bullet_id: str, outcome) -> bool:
+        """A provider with nothing to say is an invitation to write it yourself.
+
+        ``provider_unavailable`` is the ordinary case on a laptop with no model
+        running, and refusing to open the panel would make the feature reachable
+        only to people who have one. Every other error is a real error.
+        """
+        if outcome.code != "provider_unavailable":
+            return True
+        view = self.view
+        source = ""
+        for section in (view.sections if view else []):
+            for item in section.children:
+                for bullet in item.children:
+                    if bullet.node_id == bullet_id:
+                        source = bullet.label
+        self.app.push_screen(
+            VariantDialog(
+                _blank_proposal(bullet_id, view.archetype if view else "", source),
+                subtitle=f"{outcome.message} — press e to write one yourself",
+            ),
+            lambda answer: self._variant_answer(run_id, bullet_id, answer),
+        )
+        return False
+
+    def _show_variant(self, run_id: str, bullet_id: str, proposal) -> None:
+        self.app.push_screen(
+            VariantDialog(proposal),
+            lambda answer: self._variant_answer(run_id, bullet_id, answer),
+        )
+
+    def _variant_answer(self, run_id: str, bullet_id: str, answer) -> None:
+        if not answer:
+            return
+        action, payload = answer
+        if action == "recheck":
+            if payload:
+                self._propose(run_id, bullet_id, payload)
+            return
+        if action == "accept":
+            self.app.run_task(
+                f"accepting {payload}",
+                lambda: self.app.actions.accept_proposal(payload),
+                then=lambda message: self.app.notify(
+                    f"{message} — press [b]r[/b] to re-run with it",
+                    title="variant"),
+            )
+            return
+        self.app.run_task(
+            f"rejecting {payload}",
+            lambda: self.app.actions.reject_proposal(payload),
+            then=lambda message: self.app.notify(message, title="variant"),
+        )
+
     # ── the slow three ──
     def action_rerun(self) -> None:
         run_id = self._require_run()
@@ -310,6 +383,21 @@ class TailorScreen(Vertical):
         node = event.node.data
         if isinstance(node, SelectionNode) and node.kind == "bullet":
             self.app.notify(node.label, title=node.item_id, timeout=6)
+
+
+def _blank_proposal(bullet_id: str, archetype: str, source: str):
+    """An empty proposal, so the panel can open with nothing in it.
+
+    Not stored anywhere: it exists for the seconds between "no model answered"
+    and the user typing wording of their own, which then goes through
+    ``propose_variant`` and the guardrail like any other.
+    """
+    from ..service import ProposalInfo
+
+    return ProposalInfo(
+        id="", bullet_id=bullet_id, archetype=archetype or "?", text="",
+        status="draft", source=source,
+    )
 
 
 def _restore_cursor(tree: Tree, wanted: SelectionNode) -> None:

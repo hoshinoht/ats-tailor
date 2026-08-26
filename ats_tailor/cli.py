@@ -15,6 +15,7 @@ Subcommands:
 - ``jd``       — read a posting into gates and requirements, add and edit them
 - ``fit``      — cheap triage of a posting against the index, before a run
 - ``review-pack`` — one run's posting, choices and coverage, for a reviewer
+- ``propose`` / ``propose-summary`` / ``proposals`` — guarded phrasing variants
 - ``mcp``      — serve this repository to an agent runtime over stdio
 - ``tui``      — the Textual front-end in this terminal
 - ``serve``    — the same Textual app in a browser (``textual-serve``)
@@ -46,6 +47,9 @@ commands:
   jd        inspect a posting's gates and requirements (jd show | jd add)
   fit       triage a posting against the index without running the pipeline
   review-pack  one run's posting, selected claims and coverage, in one payload
+  propose   propose alternate wording for one bullet (guardrail-checked)
+  propose-summary  propose a tightened Summary for one posting's archetype
+  proposals manage proposed wording (proposals list | show | accept | reject)
   mcp       serve this repository to an agent runtime over stdio (MCP)
   tui       the Textual front-end (needs the `tui` extra)
   serve     the same Textual app in a browser, over HTTP
@@ -176,6 +180,201 @@ def _render_fit(report) -> str:
     if report.gaps:
         lines += ["", f"terms not in the index ({len(report.gaps)})",
                   "  " + ", ".join(report.gaps)]
+    return "\n".join(lines)
+
+
+def _cmd_propose(argv: list[str]) -> int:
+    """Propose alternate wording for one bullet, and print the verdict."""
+    import json
+
+    from .service import ServiceError
+
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor propose",
+        description="Propose alternate wording for one bullet, aimed at one "
+                    "archetype. The proposal is checked by the metric "
+                    "guardrail and stored as pending: it changes no file and "
+                    "reaches no resume until `ats-tailor proposals accept` "
+                    "writes it into the index.")
+    parser.add_argument("bullet_id", help="bullet id, e.g. carehaven.r1")
+    parser.add_argument("--archetype", required=True,
+                        help="skill category the wording is aimed at, e.g. "
+                             "'DevOps & Tooling' (matched case-insensitively "
+                             "against the posting's archetype)")
+    parser.add_argument("--text", default=None,
+                        help="the wording; without it, the provider is asked")
+    parser.add_argument("--requirement", action="append", default=[], metavar="ID",
+                        help="requirement id the bullet is being aligned to "
+                             "(repeatable; the first three reach the prompt)")
+    parser.add_argument("--jd", default=None,
+                        help="posting the requirement ids belong to")
+    parser.add_argument("--repo", default=".", help="repository root (default: .)")
+    parser.add_argument("--index", default=None, help="index directory")
+    parser.add_argument("--data-dir", default=None, help="store directory")
+    parser.add_argument("--provider", default=None, choices=list(config.PROVIDERS),
+                        help="who writes the proposal when --text is absent")
+    parser.add_argument("--json", action="store_true", help="print it as JSON")
+    args = parser.parse_args(argv)
+
+    service = _service(args)
+    try:
+        proposal = service.propose_variant(
+            args.bullet_id, args.archetype, args.text,
+            requirement_ids=args.requirement,
+            jd_slug=_jd_slug(args.jd) if args.jd else None,
+            provenance="cli" if args.text else None,
+        )
+    except ServiceError as exc:
+        return _service_error(exc)
+    finally:
+        service.close()
+
+    if args.json:
+        print(json.dumps(proposal.model_dump(mode="json"), indent=2))
+    else:
+        print(_render_proposal(proposal))
+    return 0 if proposal.ok else 1
+
+
+def _cmd_propose_summary(argv: list[str]) -> int:
+    """Propose a tightened Summary for one posting's archetype."""
+    import json
+
+    from .service import ServiceError
+
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor propose-summary",
+        description="Propose a tightened Summary line for the archetype of one "
+                    "posting. Same guardrail, plus: a summary may only restate "
+                    "what the index already says.")
+    parser.add_argument("jd", help="posting slug, or a path to a file in jd/")
+    parser.add_argument("--text", default=None,
+                        help="the wording; without it, the provider is asked")
+    parser.add_argument("--repo", default=".", help="repository root (default: .)")
+    parser.add_argument("--index", default=None, help="index directory")
+    parser.add_argument("--data-dir", default=None, help="store directory")
+    parser.add_argument("--provider", default=None, choices=list(config.PROVIDERS))
+    parser.add_argument("--json", action="store_true", help="print it as JSON")
+    args = parser.parse_args(argv)
+
+    service = _service(args)
+    try:
+        proposal = service.propose_summary(
+            _jd_slug(args.jd), args.text,
+            provenance="cli" if args.text else None)
+    except ServiceError as exc:
+        return _service_error(exc)
+    finally:
+        service.close()
+
+    if args.json:
+        print(json.dumps(proposal.model_dump(mode="json"), indent=2))
+    else:
+        print(_render_proposal(proposal))
+    return 0 if proposal.ok else 1
+
+
+def _cmd_proposals(argv: list[str]) -> int:
+    """List, accept and reject stored proposals."""
+    from .service import ServiceError
+
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor proposals",
+        description="The proposed wording waiting on a decision. `accept` is "
+                    "the one command here that writes tracked content.")
+    parser.add_argument("--repo", default=".", help="repository root (default: .)")
+    parser.add_argument("--index", default=None, help="index directory")
+    parser.add_argument("--data-dir", default=None, help="store directory")
+    sub = parser.add_subparsers(dest="action", required=True)
+
+    def repo_flags(sub_parser):
+        """The same three flags after the sub-command as before it.
+
+        ``SUPPRESS`` matters: a sub-parser's defaults are written into the
+        namespace *after* the parent's values, so a plain ``default=None``
+        would erase a ``--repo`` typed before the sub-command.
+        """
+        for flag in ("--repo", "--index", "--data-dir"):
+            sub_parser.add_argument(flag, default=argparse.SUPPRESS,
+                                    help=argparse.SUPPRESS)
+        return sub_parser
+
+    listing = repo_flags(sub.add_parser("list", help="every proposal, newest first"))
+    listing.add_argument("--status", default=None,
+                         choices=["pending", "accepted", "rejected"])
+    listing.add_argument("--bullet", default=None, help="one bullet's proposals")
+
+    show = repo_flags(
+        sub.add_parser("show", help="one proposal in full, with its diff"))
+    show.add_argument("proposal_id")
+
+    accept = repo_flags(sub.add_parser(
+        "accept", help="write it into the index (this changes tracked files)"))
+    accept.add_argument("proposal_id")
+
+    reject = repo_flags(
+        sub.add_parser("reject", help="refuse it; nothing is written"))
+    reject.add_argument("proposal_id")
+    reject.add_argument("--reason", default=None, help="why, in your own words")
+
+    args = parser.parse_args(argv)
+    service = _service(args)
+    try:
+        if args.action == "list":
+            rows = service.proposals(status=args.status, bullet_id=args.bullet)
+            print(_render_proposals(rows))
+            return 0
+        if args.action == "show":
+            print(_render_proposal(service.get_proposal(args.proposal_id)))
+            return 0
+        if args.action == "accept":
+            proposal = service.accept_proposal(args.proposal_id)
+            print(f"accepted {proposal.id}")
+            print(f"  wrote variants[{proposal.archetype!r}] into {proposal.path}")
+            print(f"  {proposal.text}")
+            return 0
+        proposal = service.reject_proposal(args.proposal_id, args.reason)
+        print(f"rejected {proposal.id}"
+              + (f" — {proposal.note}" if proposal.note else ""))
+        return 0
+    except ServiceError as exc:
+        return _service_error(exc)
+    finally:
+        service.close()
+
+
+def _render_proposal(proposal) -> str:
+    """One proposal: what it says, what it replaces, and the verdict."""
+    verdict = proposal.guardrail
+    lines = [
+        f"{proposal.id}  [{proposal.status}]"
+        + (f"  by {proposal.provenance}" if proposal.provenance else ""),
+        f"  target      {proposal.bullet_id}  ({proposal.archetype})",
+        f"  source      {proposal.source}",
+        f"  proposal    {proposal.text}",
+        "",
+        f"guardrail: {verdict.summary() if verdict else 'unchecked'}",
+    ]
+    for violation in (verdict.violations if verdict else []):
+        lines.append(f"  ✗ {violation.rule}: {violation.detail}")
+    if verdict and verdict.diff:
+        lines += ["", verdict.diff]
+    if proposal.note:
+        lines += ["", f"note: {proposal.note}"]
+    return "\n".join(lines)
+
+
+def _render_proposals(rows) -> str:
+    if not rows:
+        return "no proposals"
+    lines = []
+    for proposal in rows:
+        verdict = proposal.guardrail
+        state = "ok" if (verdict and verdict.ok) else "FAILED"
+        lines.append(
+            f"{proposal.id:<40} {proposal.status:<9} {state:<7} "
+            f"{proposal.archetype}")
+        lines.append(f"    {proposal.text[:110]}")
     return "\n".join(lines)
 
 
@@ -914,7 +1113,7 @@ def _resolve_run(store, reference: str):
 
 
 def _cmd_eval(argv: list[str]) -> int:
-    from .evaluation.evaluate import compare, evaluate, render_table
+    from .evaluation.evaluate import compare, evaluate, render_table, render_variants
 
     parser = argparse.ArgumentParser(
         prog="ats-tailor eval",
@@ -939,6 +1138,13 @@ def _cmd_eval(argv: list[str]) -> int:
                              "reproducible once it has run")
     parser.add_argument("--reextract", action="store_true",
                         help="ignore cached extractions and read every posting again")
+    parser.add_argument("--no-variants", action="store_true",
+                        help="v2: score the index with every bullet in its own "
+                             "words, ignoring accepted phrasing variants")
+    parser.add_argument("--variants-report", action="store_true",
+                        help="also measure what each variant is worth: every "
+                             "posting of a variant's archetype is run a second "
+                             "time without variants (doubles those runs)")
     parser.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"), default=None,
                         help="print the per-metric delta between two eval results")
     args = parser.parse_args(argv)
@@ -952,7 +1158,8 @@ def _cmd_eval(argv: list[str]) -> int:
             args.index, args.labels_dir, args.jd_dir, args.out,
             profile_path=args.profile, llm=args.llm, rerank=args.rerank,
             only=args.only, engine=args.engine, provider=args.provider,
-            reextract=args.reextract,
+            reextract=args.reextract, variants=not args.no_variants,
+            variants_report=args.variants_report,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -960,6 +1167,10 @@ def _cmd_eval(argv: list[str]) -> int:
 
     print()
     print(render_table(payload))
+    variants = render_variants(payload.get("variants") or {})
+    if variants:
+        print()
+        print(variants)
     print(f"\nwrote {payload['path']}  (config {payload['config_hash'][:12]})")
     return 0
 
@@ -1039,6 +1250,9 @@ def _cmd_serve(argv: list[str]) -> int:
 COMMANDS = {
     "tailor": _cmd_tailor,
     "fit": _cmd_fit,
+    "propose": _cmd_propose,
+    "propose-summary": _cmd_propose_summary,
+    "proposals": _cmd_proposals,
     "review-pack": _cmd_review_pack,
     "mcp": _cmd_mcp,
     "sync": _cmd_sync,

@@ -143,6 +143,9 @@ def run(argv=None):
                         help="overrides file (v2; default: overrides.yaml in the output dir)")
     parser.add_argument("--no-record", action="store_true",
                         help="do not write a run record into the runtime store (v2)")
+    parser.add_argument("--no-variants", action="store_true",
+                        help="v2: ignore the index's accepted phrasing variants "
+                             "and print every bullet in its own words")
     args = parser.parse_args(raw_args)
 
     # Wire CLI --llm-backend to config so llm.py picks it up
@@ -646,6 +649,7 @@ def _run_v2(args, jd_text, profile, index_dir, out_dir, overrides=None, store=No
             overrides=overrides, store=store, jd_path=args.jd,
             provider=provider, reextract=getattr(args, "reextract", False),
             languages=profile.get("languages", []) or [],
+            use_variants=not getattr(args, "no_variants", False),
         ),
     )
 

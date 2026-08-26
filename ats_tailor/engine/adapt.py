@@ -42,6 +42,10 @@ CATEGORY_LABELS = {"Programming Languages": "Languages"}
 #: opposed to the vocabulary it is retrieved by. A bullet tagged ``docker`` need
 #: not say "Docker" anywhere, and the keyword check reads the page, not the tags.
 PAGE_TERMS_ATTR = "page_terms"
+#: Claim attribute naming the archetype whose variant supplied the claim's
+#: text. Absent unless a variant was used, so a run over an index with no
+#: variants produces exactly the claims it produced before Phase 5.
+VARIANT_ATTR = "variant"
 
 
 def recency_prior(period) -> float:
@@ -79,10 +83,62 @@ def visible_items(index: Index) -> list[tuple[str, Role | Project]]:
     ]
 
 
+def variant_texts(index: Index, archetype: str | None) -> dict[str, tuple[str, str]]:
+    """``bullet id → (variant key, text)`` for the archetype this run is for.
+
+    Matching is case-insensitive because the archetype is a skill category name
+    that reaches the profile through a model, an agent or a JSON edit, and
+    "devops & tooling" is the same target as "DevOps & Tooling". The key that
+    is *recorded* is the one written in the YAML, so the run says which line of
+    the index it used.
+    """
+    wanted = str(archetype or "").strip().lower()
+    if not wanted:
+        return {}
+    found: dict[str, tuple[str, str]] = {}
+    for _section, item in visible_items(index):
+        for bullet in item.bullets:
+            for key, text in (getattr(bullet, "variants", {}) or {}).items():
+                if str(key).strip().lower() != wanted:
+                    continue
+                if str(text or "").strip():
+                    found[bullet.id] = (str(key), str(text).strip())
+                break
+    return found
+
+
+def bullet_texts(
+    index: Index,
+    archetype: str | None = None,
+    text_overrides: Mapping[str, str] | None = None,
+) -> dict[str, tuple[str, str | None]]:
+    """``bullet id → (text, variant key)`` — what this run will actually say.
+
+    Three sources, in increasing authority: the bullet's own text, an accepted
+    variant for the run's archetype, and the per-run ``bullet_text`` override.
+    The override wins because it is the human editing this application, which
+    outranks a variant the same human accepted for a whole class of them.
+    """
+    variants = variant_texts(index, archetype)
+    overrides = dict(text_overrides or {})
+    resolved: dict[str, tuple[str, str | None]] = {}
+    for _section, item in visible_items(index):
+        for bullet in item.bullets:
+            key, text = None, bullet.text
+            variant = variants.get(bullet.id)
+            if variant is not None:
+                key, text = variant[0], variant[1]
+            if bullet.id in overrides:
+                key, text = None, overrides[bullet.id]
+            resolved[bullet.id] = (str(text), key)
+    return resolved
+
+
 def claims_from_index(
     index: Index,
     chars_per_line: int | None = None,
     text_overrides: Mapping[str, str] | None = None,
+    archetype: str | None = None,
 ) -> list[Claim]:
     """One claim per bullet of every visible entry.
 
@@ -94,18 +150,33 @@ def claims_from_index(
     the edited wording is what gets embedded, what gets costed, and what the
     keyword-in-context bonus reads — a per-run rephrase changes the decision,
     not only the page.
+
+    ``archetype`` selects accepted phrasing variants the same way, and for the
+    same reason: a variant that changes which requirement a bullet answers has
+    to be visible to the solver, not only to the renderer.
     """
     chars_per_line = int(chars_per_line or config.CHARS_PER_BULLET_LINE)
-    text_overrides = dict(text_overrides or {})
+    resolved = bullet_texts(index, archetype, text_overrides)
     skills = index.skill_map()
     claims: list[Claim] = []
     for section, item in visible_items(index):
         item_terms = [*surface_forms(index, item.skills), *item.keywords]
         prior_base = PRIOR_RECENCY * recency_prior(item.period)
         for bullet in item.bullets:
-            text = str(text_overrides.get(bullet.id, bullet.text)).strip()
+            text, variant = resolved.get(bullet.id, (bullet.text, None))
+            text = str(text).strip()
             if not text:
                 continue
+            attrs: dict[str, object] = {
+                "kind": bullet.kind,
+                "item_kind": section,
+                "impact": bullet.kind == "impact",
+                PAGE_TERMS_ATTR: page_terms(
+                    text, [*bullet.skills, *item.skills], item.keywords, skills
+                ),
+            }
+            if variant:
+                attrs[VARIANT_ATTR] = variant
             claims.append(
                 Claim(
                     id=bullet.id,
@@ -115,14 +186,7 @@ def claims_from_index(
                     cost=max(1, math.ceil(len(text) / max(chars_per_line, 1))),
                     terms=_dedupe([*surface_forms(index, bullet.skills), *item_terms]),
                     prior=prior_base + (PRIOR_IMPACT if bullet.kind == "impact" else 0.0),
-                    attrs={
-                        "kind": bullet.kind,
-                        "item_kind": section,
-                        "impact": bullet.kind == "impact",
-                        PAGE_TERMS_ATTR: page_terms(
-                            text, [*bullet.skills, *item.skills], item.keywords, skills
-                        ),
-                    },
+                    attrs=attrs,
                 )
             )
     return claims
@@ -309,6 +373,7 @@ def render_context(
     claims: Sequence[Claim] | None = None,
     text_overrides: Mapping[str, str] | None = None,
     skill_labels: Mapping[str, str] | None = None,
+    archetype: str | None = None,
 ):
     """``(experience, projects, skill_lines)`` in the shapes the template wants.
 
@@ -317,15 +382,16 @@ def render_context(
     much their category won — that ordering is the only place the solver's
     ranking survives into the page.
 
-    ``text_overrides`` is the same map ``claims_from_index`` was built with, so
-    the page prints the wording the solver actually chose on.
+    ``text_overrides`` and ``archetype`` are the same two the claims were built
+    with, so the page prints the wording the solver actually chose on — a
+    variant that changed a decision and then failed to reach the page would be
+    the worst of both.
 
     ``skill_labels`` (skill id → label) is how the posting's own spelling
     reaches the page — see :mod:`ats_tailor.render.surface`. Absent, every
     skill prints under its index name, which is what v1 did.
     """
     legacy_skills, legacy_projects, legacy_exp, _certs, _summary = to_legacy(index)
-    text_overrides = dict(text_overrides or {})
     by_id = {c.id: c for c in (claims or [])}
     chosen = set(selection.claim_ids)
 
@@ -335,9 +401,9 @@ def render_context(
         for position, bullet in enumerate(item.bullets)
     }
     bullet_text = {
-        bullet.id: str(text_overrides.get(bullet.id, bullet.text))
-        for _section, item in visible_items(index)
-        for bullet in item.bullets
+        bullet_id: text
+        for bullet_id, (text, _variant)
+        in bullet_texts(index, archetype, text_overrides).items()
     }
 
     picked: dict[str, list[str]] = {}

@@ -1,0 +1,36 @@
+You are rephrasing one bullet of a résumé so it speaks the vocabulary of a
+particular kind of job. Answer with the rewritten bullet and nothing else: one
+line, no quotes, no bullet marker, no explanation.
+
+## The contract
+
+The bullet describes work the candidate actually did. You may re-order it,
+re-word it, and change which part it leads with. You may not change what it
+says happened. Every one of these is checked automatically after you answer,
+and a rewrite that breaks one is thrown away:
+
+- **Keep every number.** {% if metrics %}These must all still appear, with the
+  same value: {{ metrics|join(", ") }}.{% else %}The bullet claims no numbers;
+  do not add any.{% endif %}
+- **Invent no number.** No figure that is not in the source bullet.
+- **Keep every technology the bullet names.** {% if said %}These are named in
+  the source and must still be named: {{ said|join(", ") }}.{% endif %}
+- **Introduce no technology** that is neither in the source bullet nor in this
+  item's own stack{% if allowed %}: {{ allowed|join(", ") }}{% endif %}.
+- At most {{ max_chars }} characters.
+- No full stop at the end. No first person ("I", "we", "my", "our").
+
+## The target
+
+{% if archetype %}Archetype: {{ archetype }}
+{% endif %}{% if requirements %}The requirements this bullet is being aligned to:
+{% for requirement in requirements %}- {{ requirement }}
+{% endfor %}{% endif %}
+
+## The source bullet
+
+<<<BULLET
+{{ bullet }}
+BULLET>>>
+
+Answer with the rewritten bullet on one line.

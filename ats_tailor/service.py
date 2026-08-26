@@ -38,6 +38,14 @@ from typing import Any, Iterable, Mapping, Sequence
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import config
+from .guardrail import (
+    GuardrailReport,
+    check_summary,
+    check_variant,
+    item_terms,
+    source_metrics,
+    source_technologies,
+)
 from .index.io import (
     detect_layout,
     load_index_v2,
@@ -92,6 +100,20 @@ INDEX_KINDS: tuple[str, ...] = (
 
 #: How many claims :meth:`Service.fit` names as strengths.
 FIT_STRENGTHS = 5
+
+#: The ``bullet_id`` a summary proposal is filed under. Summaries have no
+#: bullet and there is exactly one of them, so a sentinel is honest where a
+#: second table would be ceremony.
+SUMMARY_TARGET = "summaries"
+
+#: How many requirements a variant prompt is given. Three is what fits in a
+#: sentence's worth of intent; more turns a rephrase into a rewrite.
+PROPOSAL_REQUIREMENTS = 3
+
+#: Longest archetype an adapter may pass. It is a skill-category name, not an
+#: id, so it is not matched against :data:`ID_RE` — but it does become a YAML
+#: key and a proposal id, and unbounded text in both is somebody's accident.
+MAX_ARCHETYPE_CHARS = 60
 
 #: Where :meth:`Service.add_jd` records what it knows about a posting that the
 #: posting itself does not say: who it is with, where it came from, and what
@@ -296,6 +318,9 @@ class EvalSummary(_Model):
     means: dict[str, Any] = Field(default_factory=dict)
     runs: int = 0
     skipped: list[str] = Field(default_factory=list)
+    #: The variants section, when the index has variants or the store has
+    #: proposals; empty otherwise, which is every sweep before Phase 5.
+    variants: dict[str, Any] = Field(default_factory=dict)
 
 
 class LabelUpdate(_Model):
@@ -401,6 +426,42 @@ class ItemUsage(_Model):
     rank: int | None = None
     bullets: list[str] = Field(default_factory=list)
     gain: float | None = None
+
+
+class ProposalInfo(_Model):
+    """One proposed rephrasing, with the verdict that decides its fate.
+
+    The text lives here and in the store, never in the index, until
+    :meth:`Service.accept_proposal` copies it into the bullet's YAML. Reading a
+    proposal is therefore always safe: nothing a model or an agent produced can
+    reach a PDF by being read.
+    """
+
+    id: str
+    bullet_id: str
+    archetype: str
+    text: str
+    status: str = "pending"
+    provenance: str | None = None
+    created_at: str = ""
+    decided_at: str | None = None
+    #: Why it was rejected, in the deciding human's words.
+    note: str | None = None
+    #: The wording the proposal would replace, and where it lives.
+    source: str = ""
+    item_id: str = ""
+    kind: str = "bullet"
+    guardrail: GuardrailReport | None = None
+    #: Set by :meth:`Service.accept_proposal`: the index file it wrote into.
+    path: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.guardrail and self.guardrail.ok)
+
+    def summary_line(self) -> str:
+        verdict = self.guardrail.summary() if self.guardrail else "unchecked"
+        return f"{self.id}  [{self.status}]  guardrail {verdict}"
 
 
 class EvalBaseline(_Model):
@@ -517,6 +578,23 @@ def _validate_id(value: Any, what: str = "id") -> str:
             f"{what} must match {ID_RE.pattern} (got {value!r})",
         )
     return identifier
+
+
+def _clean_archetype(value: Any) -> str:
+    """An archetype as it will be written: squashed, bounded, non-empty.
+
+    Not an id: it is a skill-category name ("DevOps & Tooling"), and the
+    selection matches it case-insensitively, so the spelling that reaches the
+    YAML is the caller's.
+    """
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        raise ServiceError("invalid_input", "an archetype is required")
+    if len(text) > MAX_ARCHETYPE_CHARS:
+        raise ServiceError(
+            "invalid_input",
+            f"archetype is {len(text)} characters (at most {MAX_ARCHETYPE_CHARS})")
+    return text
 
 
 def _errors_from(exc: ValidationError) -> list[str]:
@@ -1943,6 +2021,8 @@ class Service:
         engine: str = "v2",
         provider: str = "none",
         only: Sequence[str] | None = None,
+        variants: bool = True,
+        variants_report: bool = False,
     ) -> EvalSummary:
         from .evaluation.evaluate import evaluate, render_table
 
@@ -1955,6 +2035,7 @@ class Service:
                 self.index_dir, self.labels_dir, self.jd_dir, self.eval_dir,
                 profile_path=self.profile_path, engine=engine, provider=provider,
                 only=list(only) if only else None,
+                variants=bool(variants), variants_report=bool(variants_report),
             )
         except (FileNotFoundError, ValueError) as exc:
             raise ServiceError("not_found", str(exc)) from exc
@@ -1965,6 +2046,7 @@ class Service:
             means=dict(payload.get("means") or {}),
             runs=len(payload.get("runs") or []),
             skipped=list(payload.get("skipped") or []),
+            variants=dict(payload.get("variants") or {}),
         )
 
     def eval_baselines(self) -> list[EvalBaseline]:
@@ -2052,16 +2134,305 @@ class Service:
             raise ServiceError("validation_failed", str(exc)) from exc
         return LabelUpdate(path=self.rel(path), changes=changes)
 
-    # ── Phase 5 ──────────────────────────────────────────────────────────────
+    # ── Variants and the guardrail (Phase 5) ─────────────────────────────────
+    def find_bullet(self, bullet_id: str):
+        """``(bullet, item, kind)`` for one bullet id, anywhere in the index."""
+        bullet_id = _validate_id(bullet_id, "bullet id")
+        for kind, item in _visible(self.index):
+            for bullet in item.bullets:
+                if bullet.id == bullet_id:
+                    return bullet, item, kind
+        raise ServiceError("not_found", f"no bullet with id {bullet_id!r}")
+
     def propose_variant(
-        self, bullet_id: str, archetype: str, text: str | None = None
-    ) -> None:
-        raise ServiceError(
-            "not_implemented",
-            "variant proposals land in Phase 5; today a bullet's wording is "
-            "changed per run with an override, and permanently by editing the "
-            "index with index_put",
+        self,
+        bullet_id: str,
+        archetype: str,
+        text: str | None = None,
+        requirement_ids: Sequence[str] | None = None,
+        *,
+        jd_slug: str | None = None,
+        provider: str | None = None,
+        provenance: str | None = None,
+    ) -> ProposalInfo:
+        """Propose alternate wording for one bullet, and judge it.
+
+        With ``text`` the caller *is* the model — an agent through the MCP, or
+        a person in the TUI — and only the guardrail runs. Without it the
+        configured provider is asked, and a provider with nothing to say
+        (``none``, ``external``, an unreachable model) is a
+        ``provider_unavailable``, not an empty proposal.
+
+        Either way the result is stored ``pending``. Nothing here writes the
+        index; :meth:`accept_proposal` does, and only for a proposal that
+        passed.
+        """
+        archetype = _clean_archetype(archetype)
+        bullet, item, _kind = self.find_bullet(bullet_id)
+        requirements = self._requirement_texts(requirement_ids, jd_slug)
+
+        proposed = str(text or "").strip()
+        source = "agent"
+        if not proposed:
+            engine = self._provider(provider)
+            answer = engine.propose_variant(
+                bullet.text, archetype, requirements,
+                # Exactly what the guardrail will check, in its own words.
+                metrics=source_metrics(bullet),
+                said=source_technologies(bullet.text, item, self.index),
+                allowed=list(item_terms(item, self.index)),
+            )
+            proposed = str(answer or "").strip()
+            source = engine.name
+            if not proposed:
+                raise ServiceError(
+                    "provider_unavailable",
+                    f"provider {engine.name!r} proposed nothing for {bullet.id}; "
+                    f"pass `text` to submit wording of your own",
+                )
+
+        report = check_variant(bullet, item, proposed, self.index)
+        stored = self.store.add_proposal(
+            bullet_id=bullet.id,
+            archetype=archetype,
+            text=proposed,
+            guardrail=report.model_dump(mode="json"),
+            provenance=str(provenance or source),
         )
+        return self._proposal_info(stored)
+
+    def proposals(
+        self,
+        status: str | None = None,
+        bullet_id: str | None = None,
+        archetype: str | None = None,
+    ) -> list[ProposalInfo]:
+        """Every stored proposal, newest first, optionally filtered."""
+        from .runs.store import ProposalStatusError
+
+        try:
+            rows = self.store.list_proposals(
+                status=status, bullet_id=bullet_id,
+                archetype=_clean_archetype(archetype) if archetype else None,
+            )
+        except ProposalStatusError as exc:
+            raise ServiceError("invalid_input", str(exc)) from exc
+        return [self._proposal_info(row) for row in rows]
+
+    def get_proposal(self, proposal_id: str) -> ProposalInfo:
+        row = self.store.get_proposal(str(proposal_id or "").strip())
+        if row is None:
+            raise ServiceError("not_found", f"no proposal with id {proposal_id!r}")
+        return self._proposal_info(row)
+
+    def accept_proposal(self, proposal_id: str) -> ProposalInfo:
+        """Write an accepted proposal into the index, and mark it accepted.
+
+        **This changes tracked content.** The text lands in the bullet's
+        ``variants[<archetype>]`` (or ``summaries.variants``) with a provenance
+        comment beside it, and every future run for that archetype prints it.
+        A proposal the guardrail refused cannot be accepted at all: the point
+        of the guardrail is that no human has to remember to check.
+        """
+        from .runs.store import ProposalStatusError
+
+        info = self.get_proposal(proposal_id)
+        if info.status != "pending":
+            raise ServiceError(
+                "conflict", f"{info.id} is already {info.status}")
+        if not info.ok:
+            raise ServiceError(
+                "validation_failed",
+                f"{info.id} did not pass the guardrail and cannot be accepted",
+                [f"{v.rule}: {v.detail}"
+                 for v in (info.guardrail.violations if info.guardrail else [])],
+            )
+
+        if info.kind == "summary":
+            summaries = self.index.summaries
+            self.index_put(
+                "summaries", "",
+                {"variants": {**dict(summaries.variants), info.archetype: info.text}},
+            )
+            path = self.index_dir / "summaries.yaml"
+            _comment_variant(path, None, info.archetype, info.provenance or "agent")
+        else:  # noqa: RET506 - the two branches write two different files
+            bullet, item, kind = self.find_bullet(info.bullet_id)
+            self.index_put(
+                kind, item.id,
+                {"bullets": [{"id": bullet.id,
+                              "variants": {info.archetype: info.text}}]},
+            )
+            path = self.locate(self.entity_path(kind, item.id))
+            _comment_variant(path, bullet.id, info.archetype,
+                             info.provenance or "agent")
+        self._index = None
+
+        try:
+            decided = self.store.decide_proposal(info.id, "accepted")
+        except (KeyError, ProposalStatusError) as exc:
+            raise ServiceError("conflict", str(exc)) from exc
+        return self._proposal_info(decided).model_copy(
+            update={"path": self.rel(path)})
+
+    def reject_proposal(self, proposal_id: str, reason: str | None = None) -> ProposalInfo:
+        """Mark a proposal rejected. Nothing is written to the index."""
+        from .runs.store import ProposalStatusError
+
+        info = self.get_proposal(proposal_id)
+        if info.status != "pending":
+            raise ServiceError("conflict", f"{info.id} is already {info.status}")
+        try:
+            decided = self.store.decide_proposal(info.id, "rejected", reason)
+        except (KeyError, ProposalStatusError) as exc:
+            raise ServiceError("conflict", str(exc)) from exc
+        return self._proposal_info(decided)
+
+    def propose_summary(
+        self,
+        slug: str,
+        text: str | None = None,
+        *,
+        provider: str | None = None,
+        provenance: str | None = None,
+    ) -> ProposalInfo:
+        """Propose a tightened Summary for one posting's archetype.
+
+        The starting point is what a run of this posting would print — the
+        archetype's variant if the index has one, the default otherwise, plus
+        the target title — and the guardrail is the same contract with one
+        difference: a summary may only restate what the résumé already says, so
+        every technology and every number in it must appear in the index's
+        summaries, its highlights, or the claims this posting selected.
+        """
+        profile = self.jd_profile(slug, provider=provider)
+        archetype = _clean_archetype(profile.archetype or "")
+        summaries = self.index.summaries
+        current = str(
+            summaries.variants.get(archetype) or summaries.default or "").strip()
+        if not current:
+            raise ServiceError(
+                "not_found",
+                "the index has no summary to polish; write one with "
+                "index_put(\"summaries\", …) first",
+            )
+        allowed = self._summary_corpus(slug)
+
+        proposed = str(text or "").strip()
+        source = "agent"
+        if not proposed:
+            engine = self._provider(provider)
+            answer = engine.propose_summary(
+                current, archetype, profile.title, allowed)
+            proposed = str(answer or "").strip()
+            source = engine.name
+            if not proposed:
+                raise ServiceError(
+                    "provider_unavailable",
+                    f"provider {engine.name!r} proposed nothing for the summary; "
+                    f"pass `text` to submit wording of your own",
+                )
+
+        report = check_summary(proposed, allowed, source=current, index=self.index)
+        stored = self.store.add_proposal(
+            bullet_id=SUMMARY_TARGET,
+            archetype=archetype,
+            text=proposed,
+            guardrail=report.model_dump(mode="json"),
+            provenance=str(provenance or source),
+        )
+        return self._proposal_info(stored, source_text=current)
+
+    # ── the parts the four methods above share ──
+    def _proposal_info(self, row, source_text: str | None = None) -> ProposalInfo:
+        kind = "summary" if row.bullet_id == SUMMARY_TARGET else "bullet"
+        source, item_id = str(source_text or ""), ""
+        if kind == "bullet":
+            try:
+                bullet, item, _kind = self.find_bullet(row.bullet_id)
+                source, item_id = bullet.text, item.id
+            except ServiceError:
+                pass  # the bullet may have been renamed since; the row stands
+        elif not source:
+            summaries = self.index.summaries
+            source = str(summaries.variants.get(row.archetype)
+                         or summaries.default or "")
+        guardrail = None
+        if row.guardrail is not None:
+            try:
+                guardrail = GuardrailReport.model_validate(row.guardrail)
+            except ValidationError:
+                guardrail = None
+        return ProposalInfo(
+            id=row.id, bullet_id=row.bullet_id, archetype=row.archetype,
+            text=row.text, status=row.status, provenance=row.provenance,
+            created_at=row.created_at, decided_at=row.decided_at,
+            note=getattr(row, "note", None),
+            source=source, item_id=item_id, kind=kind, guardrail=guardrail,
+        )
+
+    def _requirement_texts(
+        self, requirement_ids: Sequence[str] | None, jd_slug: str | None = None
+    ) -> list[str]:
+        """The requirements a proposal is being aligned to, as their own text.
+
+        Ids are the extractor's (``req-3``), which only mean something next to
+        a posting: ``jd_slug`` names it, and without one the recorded runs are
+        searched newest first — which is what the TUI means, where the ids on
+        screen came from the run that is open. An id nothing resolves is
+        dropped rather than passed to a model as the literal string "req-3".
+        """
+        wanted = [str(i).strip() for i in (requirement_ids or []) if str(i).strip()]
+        if not wanted:
+            return []
+        found: dict[str, str] = {}
+        if jd_slug:
+            for spec in self.jd_profile(jd_slug).requirements:
+                if spec.id in wanted:
+                    found[spec.id] = spec.text
+        if len(found) < len(wanted):
+            for run in self.store.list_runs():
+                for row in (run.data or {}).get("requirements") or []:
+                    rid = str(row.get("id") or "")
+                    if rid in wanted and rid not in found:
+                        found[rid] = str(row.get("text") or "")
+                if len(found) == len(wanted):
+                    break
+        return [found[rid] for rid in wanted if found.get(rid)][:PROPOSAL_REQUIREMENTS]
+
+    def _summary_corpus(self, slug: str | None = None) -> list[str]:
+        """Everything a summary is allowed to be made of.
+
+        Exactly what ``docs/v2-design.md`` §5 allows it to restate: the index's
+        summaries, its highlights, and the claims this posting selected — the
+        newest recorded run of it when there is one, every visible bullet when
+        there is not. Deliberately *not* the skills taxonomy: a skill the index
+        lists and no bullet demonstrates is a line on the Skills row, not a
+        sentence about what the candidate has done.
+        """
+        index = self.index
+        lines: list[str] = [index.summaries.default, *index.summaries.highlights]
+        lines.extend(str(v) for v in index.summaries.variants.values())
+        selected: list[str] = []
+        if slug:
+            for run in self.store.list_runs():
+                data = run.data or {}
+                if Path(str(data.get("jd_path") or "")).stem != slug:
+                    continue
+                selected = list((data.get("selection") or {}).get("claims") or [])
+                break
+        chosen = set(selected)
+        for _kind, item in _visible(index):
+            if chosen and not any(b.id in chosen for b in item.bullets):
+                continue
+            lines.append(getattr(item, "summary", "") or "")
+            lines.append(getattr(item, "title", "") or "")
+            lines.append(getattr(item, "company", "") or "")
+            for bullet in item.bullets:
+                if not chosen or bullet.id in chosen:
+                    lines.append(bullet.text)
+                    lines.extend(str(v) for v in (bullet.variants or {}).values())
+        return [line for line in (str(v).strip() for v in lines) if line]
 
 
 # ── module helpers ───────────────────────────────────────────────────────────
@@ -2169,6 +2540,51 @@ def _merge_bullets(
         merged.append(bullet)
         added.append(bullet_id)
     return merged, added
+
+
+def _comment_variant(
+    path: Path, bullet_id: str | None, archetype: str, provenance: str
+) -> None:
+    """Mark an accepted variant in the YAML with where it came from.
+
+    ``# proposed 2026-08-26 via external, accepted`` beside the archetype key,
+    for the same reason a new bullet gets one: the person reading the pull
+    request is entitled to know that a sentence in their résumé was written by
+    a model and approved by them, and a schema field would carry that fact into
+    the store, the report and every payload instead.
+    """
+    from ruamel.yaml import YAML
+
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+    yaml.width = 4096
+    yaml.indent(mapping=2, sequence=4, offset=2)
+    try:
+        data = yaml.load(path.read_text())
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    if bullet_id is None:
+        holder = data.get("variants")
+    else:
+        holder = None
+        for bullet in data.get("bullets") or []:
+            if str(bullet.get("id")) == str(bullet_id):
+                holder = bullet.get("variants")
+                break
+    if holder is None or archetype not in holder:
+        return
+    if archetype in getattr(holder.ca, "items", {}):
+        return  # a comment is already there; do not stack them up
+    stamp = datetime.now().date().isoformat()
+    holder.yaml_add_eol_comment(f"proposed {stamp} via {provenance}, accepted",
+                                archetype)
+    import io as _io
+
+    buffer = _io.StringIO()
+    yaml.dump(data, buffer)
+    path.write_text(buffer.getvalue())
 
 
 def _comment_bullets(path: Path, bullet_ids: Sequence[str], provenance: str) -> None:

@@ -16,6 +16,7 @@ upgraded in place rather than thrown away.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -133,7 +134,33 @@ MIGRATIONS: list[str] = [
     ALTER TABLE jd_profiles_v2 RENAME TO jd_profiles;
     CREATE INDEX IF NOT EXISTS jd_profiles_hash ON jd_profiles(jd_hash);
     """,
+    # ── v3 (Phase 5): proposed wording, before a human has decided about it ──
+    # A proposal is not index content and must never be mistaken for it: it
+    # lives here, with the guardrail verdict that judged it and the provenance
+    # of whoever wrote it, until `accept_proposal` copies the text into the
+    # bullet's YAML. Rejected and superseded proposals are kept — the record of
+    # what was refused is the audit trail the honesty rules are worth having.
+    """
+    CREATE TABLE IF NOT EXISTS proposals (
+        id             TEXT PRIMARY KEY,
+        bullet_id      TEXT NOT NULL,
+        archetype      TEXT NOT NULL,
+        text           TEXT NOT NULL,
+        guardrail_json TEXT,
+        status         TEXT NOT NULL DEFAULT 'pending',
+        provenance     TEXT,
+        note           TEXT,
+        created_at     TEXT NOT NULL,
+        decided_at     TEXT
+    );
+    CREATE INDEX IF NOT EXISTS proposals_bullet ON proposals(bullet_id);
+    CREATE INDEX IF NOT EXISTS proposals_status ON proposals(status);
+    """,
 ]
+
+#: What a proposal can be. ``pending`` until a human says otherwise; the other
+#: two are final, and a decided proposal is never edited, only superseded.
+PROPOSAL_STATUSES: tuple[str, ...] = ("pending", "accepted", "rejected")
 
 
 def now() -> str:
@@ -219,6 +246,49 @@ class Note:
     run_id: str
     created_at: str
     note: str
+
+
+@dataclass(frozen=True)
+class Proposal:
+    """One proposed rephrasing of one bullet, for one archetype.
+
+    ``guardrail`` is the JSON of
+    :class:`ats_tailor.guardrail.GuardrailReport` as it stood when the
+    proposal was made. It is stored rather than recomputed on read: the verdict
+    is about the index the proposal was judged against, and an index that has
+    since changed would silently rewrite history.
+    """
+
+    id: str
+    bullet_id: str
+    archetype: str
+    text: str
+    guardrail: dict[str, Any] | None
+    status: str
+    provenance: str | None
+    created_at: str
+    decided_at: str | None = None
+    #: Why it was rejected, in the deciding human's words.
+    note: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """Whether the guardrail passed it. A missing verdict is not a pass."""
+        return bool((self.guardrail or {}).get("ok"))
+
+
+class ProposalStatusError(ValueError):
+    """A proposal status outside :data:`PROPOSAL_STATUSES`."""
+
+
+def validate_proposal_status(status: str) -> str:
+    value = str(status or "").strip().lower()
+    if value not in PROPOSAL_STATUSES:
+        raise ProposalStatusError(
+            f"unknown proposal status {status!r}; expected one of: "
+            f"{', '.join(PROPOSAL_STATUSES)}"
+        )
+    return value
 
 
 class StatusError(ValueError):
@@ -592,6 +662,126 @@ class Store:
         ).fetchall()
         return [Note(r["run_id"], r["created_at"], r["note"]) for r in rows]
 
+    # ── proposals ──
+    def add_proposal(
+        self,
+        bullet_id: str,
+        archetype: str,
+        text: str,
+        guardrail: Mapping[str, Any] | None = None,
+        provenance: str | None = None,
+        status: str = "pending",
+        proposal_id: str | None = None,
+    ) -> Proposal:
+        """Record a proposal. The id is generated unless one is given."""
+        status = validate_proposal_status(status)
+        created = now()
+        identifier = proposal_id or self._next_proposal_id(bullet_id, archetype)
+        self.conn.execute(
+            "INSERT INTO proposals (id, bullet_id, archetype, text, "
+            "guardrail_json, status, provenance, created_at, decided_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET bullet_id=excluded.bullet_id, "
+            "archetype=excluded.archetype, text=excluded.text, "
+            "guardrail_json=excluded.guardrail_json, status=excluded.status, "
+            "provenance=excluded.provenance",
+            (identifier, str(bullet_id), str(archetype), str(text),
+             _dumps(dict(guardrail)) if guardrail is not None else None,
+             status, provenance, created,
+             created if status != "pending" else None),
+        )
+        self.conn.commit()
+        proposal = self.get_proposal(identifier)
+        assert proposal is not None
+        return proposal
+
+    def _next_proposal_id(self, bullet_id: str, archetype: str) -> str:
+        """``<bullet>.<archetype-slug>-N`` — readable, and unique per bullet.
+
+        A counter rather than a timestamp because a proposal id is typed by
+        hand at a CLI and read aloud in a review; two proposals for the same
+        bullet inside one second are also perfectly ordinary when an agent is
+        driving.
+        """
+        slug = re.sub(r"[^a-z0-9]+", "-", str(archetype).strip().lower()).strip("-")
+        base = f"{bullet_id}.{slug or 'any'}"
+        taken = {
+            row["id"]
+            for row in self.conn.execute(
+                "SELECT id FROM proposals WHERE id LIKE ?", (f"{base}-%",)
+            ).fetchall()
+        }
+        suffix = 1
+        while f"{base}-{suffix}" in taken:
+            suffix += 1
+        return f"{base}-{suffix}"
+
+    def get_proposal(self, proposal_id: str) -> Proposal | None:
+        row = self.conn.execute(
+            "SELECT * FROM proposals WHERE id = ?", (proposal_id,)
+        ).fetchone()
+        return None if row is None else _proposal(row)
+
+    def list_proposals(
+        self,
+        status: str | None = None,
+        bullet_id: str | None = None,
+        archetype: str | None = None,
+    ) -> list[Proposal]:
+        """Newest first, which is the order a review reads them in."""
+        clauses, params = [], []
+        if status:
+            clauses.append("status = ?")
+            params.append(validate_proposal_status(status))
+        if bullet_id:
+            clauses.append("bullet_id = ?")
+            params.append(str(bullet_id))
+        if archetype:
+            clauses.append("LOWER(archetype) = ?")
+            params.append(str(archetype).strip().lower())
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM proposals{where} ORDER BY created_at DESC, rowid DESC",
+            params,
+        ).fetchall()
+        return [_proposal(row) for row in rows]
+
+    def decide_proposal(
+        self, proposal_id: str, status: str, note: str | None = None
+    ) -> Proposal:
+        """Move a proposal to ``accepted`` or ``rejected``, stamping the time.
+
+        A decision is made once: a proposal that has already been decided is a
+        conflict, not an update, because the index may already carry its text.
+        """
+        status = validate_proposal_status(status)
+        if status == "pending":
+            raise ProposalStatusError("a decision is 'accepted' or 'rejected'")
+        proposal = self.get_proposal(proposal_id)
+        if proposal is None:
+            raise KeyError(f"no such proposal: {proposal_id}")
+        if proposal.status != "pending":
+            raise ProposalStatusError(
+                f"{proposal_id} is already {proposal.status}")
+        self.conn.execute(
+            "UPDATE proposals SET status = ?, decided_at = ?, "
+            "note = COALESCE(?, note) WHERE id = ?",
+            (status, now(), str(note).strip() if note and str(note).strip() else None,
+             proposal_id),
+        )
+        self.conn.commit()
+        updated = self.get_proposal(proposal_id)
+        assert updated is not None
+        return updated
+
+    def accepted_variant(self, bullet_id: str, archetype: str) -> Proposal | None:
+        """The accepted proposal a rendered variant came from, if there is one."""
+        rows = [
+            p for p in self.list_proposals(status="accepted", bullet_id=bullet_id)
+            if p.archetype.strip().lower() == str(archetype).strip().lower()
+        ]
+        return rows[0] if rows else None
+
     def last_note_at(self, run_id: str) -> str | None:
         row = self.conn.execute(
             "SELECT created_at FROM run_notes WHERE run_id = ? "
@@ -619,6 +809,16 @@ def _jd_profile(row: sqlite3.Row) -> JDProfileRow:
         provider=row["provider"], prompt_version=row["prompt_version"],
         extracted=_loads(row["extracted_json"]), edited=_loads(row["edited_json"]),
         created_at=row["created_at"],
+    )
+
+
+def _proposal(row: sqlite3.Row) -> Proposal:
+    return Proposal(
+        id=row["id"], bullet_id=row["bullet_id"], archetype=row["archetype"],
+        text=row["text"], guardrail=_loads(row["guardrail_json"]),
+        status=row["status"], provenance=row["provenance"],
+        created_at=row["created_at"], decided_at=row["decided_at"],
+        note=row["note"],
     )
 
 

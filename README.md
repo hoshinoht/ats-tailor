@@ -69,6 +69,9 @@ ats-tailor <command> [options]
 | `jd add [file] --company --role [--source-url]` | Store a pasted posting as `jd/<slug>.txt`, sanitised: HTML comments, `<script>`/`<style>` blocks, tags, invisible characters and blank-line runs are stripped and counted. Reads stdin without a file. The URL is recorded as text and never fetched. |
 | `fit <slug> [--json]` | Cheap triage before a run: the hard gates, the best requirement coverage the index could reach, the claims carrying it, and the terms nothing covers. No selection, no LaTeX, no PDF. |
 | `review-pack <run> [--json]` | One run's posting, gates, requirements, selected claims and coverage table in one payload — what a reviewing agent reads. |
+| `propose <bullet_id> --archetype … [--text …]` | Propose alternate wording for one bullet and print the guardrail's verdict with a diff. Exit 1 when the guardrail refuses it. Nothing is written. |
+| `propose-summary <slug> [--text …]` | The same for the Summary line of one posting's archetype. |
+| `proposals list\|show\|accept\|reject` | The proposed wording waiting on a decision. `accept` is the one command here that writes tracked content. |
 | `mcp --repo DIR [--provider …] [--allow-eval]` | Serve the repository to an agent runtime over stdio (Model Context Protocol). Silent while idle. `--allow-eval` additionally exposes the scoring sweep. |
 | `tui [--repo DIR] [--provider …]` | The Textual front-end: applications, one run in three panes, the index, the eval baselines. Needs the `tui` extra. |
 | `serve [--repo DIR] [--host] [--port]` | The same app in a browser over HTTP (`textual-serve`). Defaults to `localhost:8000`; the container image serves `0.0.0.0:8080`. |
@@ -242,12 +245,16 @@ writes `Amazon Web Services` and the index says `AWS`, it renders
 index calls `Docker`, it renders `Docker (Containerization)`. Both forms once,
 never a third time, and no term is printed twice across the section — the
 canonical keyword never leaves the page to make room for the posting's synonym.
-**Bullets are never rewritten** — that is Phase 5, behind a metric guardrail.
+**Bullets are never rewritten here.** A bullet reaches the page in the index's
+words, in an accepted variant's words, or in a per-run override's — all three
+are wording a human wrote or approved (see [Variants and the
+guardrail](#variants-and-the-guardrail)); the renderer invents nothing.
 
 The Summary takes `summaries.variants[<archetype>]` when the index has one for
 the archetype the posting leans on, and the posting's job title is appended once
 as an honest target statement (`… Targeting: Site Reliability Engineer Intern.`,
-`ATS_TARGET_TITLE`).
+`ATS_TARGET_TITLE`). `ats-tailor propose-summary <slug>` proposes a tightened
+one under the guardrail.
 
 ### Reranking
 
@@ -337,7 +344,7 @@ back in `RunSummary.warnings`.
 ats-tailor mcp --repo ~/projects/personal/resume
 ```
 
-Stdio, nineteen tools (twenty with `--allow-eval`), the conventions of
+Stdio, twenty-three tools (twenty-four with `--allow-eval`), the conventions of
 `gofetch-mcp` / `researcher-mcp`:
 `snake_case` names, `{"ok": true, …}` or `{"ok": false, "error": {"code",
 "message"}}` (nothing ever raises to the client), `max_chars`/`offset`
@@ -365,7 +372,11 @@ healthcheck, and silence at idle.
 | `ats_outcome(run_id, status, note?)` | Record what happened. Never inferred. |
 | `ats_followups(days?)` | Open applications quiet for `days` days. |
 | `ats_eval(engine?, provider?, only?)` | The full scoring sweep over the labels. Slow. **Only registered with `--allow-eval`** — see below. |
-| `ats_propose_variant` | Phase 5; returns `not_implemented`. |
+| `ats_propose_variant(bullet_id, archetype, text?, requirement_ids?, jd_slug?)` | Propose wording for one bullet. Guardrail-checked, stored `pending`, writes nothing. |
+| `ats_propose_summary(slug, text?)` | Propose a tightened Summary for that posting's archetype. |
+| `ats_proposals(status?, bullet_id?)` | Proposals with their verdicts, newest first. |
+| `ats_accept_proposal(id)` | **Writes the index**: the text lands in the bullet's `variants[<archetype>]`. The user's decision, never the agent's. |
+| `ats_reject_proposal(id, reason?)` | Refuse it, with the reason. Nothing is written. |
 
 Conduct rules, enforced in code and tested:
 
@@ -664,6 +675,94 @@ survive. Ids naming nothing in the index are reported and ignored rather than
 failing the run. Then re-run `tailor --engine v2 --output <same dir>`; the new
 run record carries the overrides that were applied.
 
+## Variants and the guardrail
+
+An override changes one application's wording. A **variant** changes it for a
+whole class of them: `variants[<archetype>]` on a bullet is the phrasing used
+whenever a posting resolves to that archetype, and the archetype is the skill
+category the posting leans on hardest (`ats-tailor fit` prints it).
+
+```yaml
+bullets:
+  - id: carehaven.r1
+    kind: responsibility
+    text: Architected gRPC API Gateway with Firebase auth and rate limiting
+    variants:
+      DevOps & Tooling: Architected gRPC API Gateway with Firebase auth, rate limiting, and Docker-based rollout  # proposed 2026-08-26 via external, accepted
+```
+
+The principle is one sentence: **a model or an agent may propose wording; only
+a human accepts it, and nothing reaches a PDF that the guardrail has not
+passed.** The index stays the only source of facts.
+
+### The guardrail
+
+`ats_tailor.guardrail.check_variant(source, item, proposed, index)` returns
+`{ok, violations: [{rule, detail}], diff}`. Seven rules, each of them a way a
+rephrase can quietly stop being true:
+
+| Rule | What it refuses |
+| ---- | --------------- |
+| `metrics` | dropping a number the source bullet claims. `15%` and `15 %` are the same figure; `15%` and `20%` are not. Numbers the bullet's text carries count even when nobody filled in `metrics`. |
+| `technology` | dropping a technology the source *says* — by any of its surface forms, so "Kubernetes" still answers a source that said "K8s". |
+| `new_technology` | naming a technology that is in neither the source bullet nor the item's own `tech_stack`/`skills`/`keywords`. Checked against the index alias map *and* by the same gap detector `check` uses, so a word nothing in the index has ever heard of is refused too. |
+| `numbers` | inventing a figure the source never carried. |
+| `length` | more than 180 characters (`MAX_BULLET_CHARS`). |
+| `style` | an empty line, or a trailing full stop — index bullets do not end in one. |
+| `person` | the first person. A resume bullet has no subject. |
+
+A refused proposal cannot be accepted at all, from any front-end. The report
+carries a unified diff between the index's wording and the proposal, so what
+changed is visible next to why it was refused.
+
+The Summary has one extra rule: it may only restate what the résumé already
+says, so every technology and every number in a proposed summary must appear in
+the index's summaries, its highlights, or the claims the posting selected.
+
+### The loop
+
+```bash
+ats-tailor propose carehaven.r1 --archetype 'DevOps & Tooling' \
+  --text 'Architected gRPC API Gateway with Firebase auth, rate limiting, and Docker-based rollout'
+ats-tailor proposals list
+ats-tailor proposals accept carehaven.r1.devops-tooling-1   # writes index/projects/carehaven.yaml
+ats-tailor proposals reject carehaven.r1.sre-1 --reason 'invented a throughput figure'
+```
+
+Without `--text` the configured provider writes it (`--provider ollama`), from
+a prompt that carries the guardrail's rules verbatim, the source bullet, its
+metrics, the item's stack, the archetype and the top three requirements the
+bullet is being aligned to. A provider with nothing to say is
+`provider_unavailable`, never an empty proposal.
+
+Proposals live in the runtime store (`proposals`: id, bullet, archetype, text,
+the guardrail verdict as JSON, `pending|accepted|rejected`, provenance, and
+when it was decided) until they are accepted — never in the index. Accepting
+writes the YAML through the round-trip writer with a provenance comment beside
+the variant, so a pull request shows that a sentence was proposed by a model
+and approved by a person. Rejected proposals are kept: what was refused, and
+why, is the record that makes the guardrail worth having.
+
+In the TUI, `v` on a bullet in the Tailor screen opens the proposal panel:
+the proposal, the verdict with each violation spelled out, `a` accept
+(which writes the index), `d` reject, `e` edit and `ctrl+s` to re-check the
+edit. With no model reachable the panel opens empty, for wording of your own.
+
+### What a variant does to a run
+
+A variant is substituted before the score matrix is built, exactly where a
+`bullet_text` override is: the variant's words are what gets embedded, costed
+and rendered, so a rephrase changes what the solver picks and not only what the
+page prints. A per-run `bullet_text` override still wins over a variant — the
+human editing this one application outranks a variant they accepted for a class
+of them. The run record and `selection.json` list every variant used, with the
+guardrail verdict that let it in, and the match report prints them in a
+"Phrasing variants used" table.
+
+`ats-tailor eval --no-variants` scores the index with every bullet in its own
+words; `--variants-report` additionally measures what each variant is worth by
+running every posting of its archetype both ways.
+
 ## Tracker
 
 Every `tailor --engine v2` records a run — id `<company>-<role>-<timestamp>`,
@@ -793,6 +892,8 @@ ats-tailor eval --index index --labels-dir labels --jd-dir jd --out eval
 ats-tailor eval --engine v1 ...              # score the legacy engine instead
 ats-tailor eval --provider ollama ...        # let a model read the postings
 ats-tailor eval --provider ollama --reextract  # ... and read them again
+ats-tailor eval --no-variants                # ignore accepted phrasing variants
+ats-tailor eval --variants-report            # ... and measure what each is worth
 ```
 
 Runs the pipeline for every label into `eval/runs/<slug>/`, compiles, checks,
@@ -806,6 +907,15 @@ and prints a per-JD table with means:
 | `P@k proj` / `P@k role` | precision of the top-*k* selected items against the pins (*k* = number of pins) |
 | `excl` | excluded ids the run selected anyway — should be 0 |
 | `tau` | Kendall τ against the label's full preference order |
+
+When the index carries variants or the store has proposals, a `variants`
+section follows the table: the guardrail pass rate over every proposal ever
+made, and — with `--variants-report` — the mean must-coverage and context
+delta each variant bought, measured by running every posting of its archetype a
+second time with `--no-variants`. The attribution is per archetype (variants of
+one archetype are on or off together), credited to the variants the run
+actually selected; measuring one bullet at a time would cost a sweep per
+bullet.
 
 A metric with nothing to measure prints `—` and is left out of the mean. A
 label whose JD file is not on this machine is skipped with a note and listed

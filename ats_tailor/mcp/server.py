@@ -1,4 +1,4 @@
-"""The stdio MCP server: twenty thin tools over one :class:`Service`.
+"""The stdio MCP server: twenty-four thin tools over one :class:`Service`.
 
 Conventions are the ones ``gofetch-mcp`` and ``researcher-mcp`` already use in
 this setup, because an agent should not have to learn a new dialect per server:
@@ -27,7 +27,9 @@ by a third party — and an agent reading it must know that before it reads it.
 ``gofetch``'s job), no subprocess but ``latexmk``/``pdftotext``/``pdfinfo`` is
 run, and every claim on a rendered resume comes from an index entity by id. A
 gap is reported by ``ats_fit`` and ``ats_check``; the way to close one is
-``ats_index_put``, not phrasing.
+``ats_index_put``, not phrasing. Phase 5's variant tools do not soften that:
+an agent may *propose* wording, the guardrail judges it against the source
+bullet, and only ``ats_accept_proposal`` — a human's decision — writes it.
 """
 
 from __future__ import annotations
@@ -715,19 +717,97 @@ class ToolSet:
         summary = self.service.eval(engine=engine, provider=provider, only=only)
         return {"ok": True, "eval": summary.model_dump(mode="json")}
 
+    # ── variants ─────────────────────────────────────────────────────────
     @_guard
     def ats_propose_variant(
-        self, bullet_id: str, archetype: str, text: str | None = None
+        self,
+        bullet_id: str,
+        archetype: str,
+        text: str | None = None,
+        requirement_ids: list[str] | None = None,
+        jd_slug: str | None = None,
     ) -> dict[str, Any]:
-        """Not implemented yet (Phase 5): propose alternate wording for a bullet.
+        """Propose alternate wording for one bullet, aimed at one archetype.
 
-        Today, change a bullet's wording for one application with
-        `ats_override(bullet_text=…)`, or permanently with `ats_index_put`.
-        Both keep the claim attached to its evidence, which is the property a
-        variant generator has to preserve.
+        Write the `text` yourself: you are the model here. What you send is
+        checked against the source bullet by the guardrail and stored as
+        `pending` — it does **not** change the index and does not reach a
+        resume until a human accepts it with `ats_accept_proposal`.
+
+        The guardrail refuses a proposal that drops a number the source bullet
+        claims, invents a number, drops a technology the source names,
+        introduces a technology the bullet and its item do not have, runs past
+        180 characters, ends in a full stop, or uses the first person. The
+        reply carries every violation with a diff, so a refused proposal can be
+        fixed and sent again.
+
+        Rephrasing is not a way to cover a gap: if the index does not have the
+        evidence, add the evidence with `ats_index_put`.
         """
-        self.service.propose_variant(bullet_id, archetype, text)
-        return {"ok": False, "error": {"code": "not_implemented", "message": "Phase 5"}}
+        proposal = self.service.propose_variant(
+            bullet_id, archetype, text,
+            requirement_ids=requirement_ids, jd_slug=jd_slug,
+        )
+        return _proposal_payload(proposal)
+
+    @_guard
+    def ats_propose_summary(
+        self, slug: str, text: str | None = None
+    ) -> dict[str, Any]:
+        """Propose a tightened Summary line for one posting's archetype.
+
+        Same contract as `ats_propose_variant`, with one extra rule: a summary
+        may only restate what the resume already says, so every technology and
+        every number in it must already appear in the index's summaries,
+        highlights or the claims this posting selected. Stored `pending`;
+        `ats_accept_proposal` is what writes it into
+        `summaries.variants[<archetype>]`.
+        """
+        return _proposal_payload(self.service.propose_summary(slug, text))
+
+    @_guard
+    def ats_proposals(
+        self, status: str | None = None, bullet_id: str | None = None
+    ) -> dict[str, Any]:
+        """List stored proposals, newest first, with their guardrail verdicts.
+
+        Filter by `status` (`pending`, `accepted`, `rejected`) or by
+        `bullet_id`. A `pending` proposal has been checked and is waiting for a
+        human; nothing about it is on any page yet.
+        """
+        rows = [
+            _proposal_row(proposal)
+            for proposal in self.service.proposals(status=status, bullet_id=bullet_id)
+        ]
+        return {"ok": True, "count": len(rows), "proposals": rows}
+
+    @_guard
+    def ats_accept_proposal(self, proposal_id: str) -> dict[str, Any]:
+        """Accept a proposal — **this writes the index**.
+
+        The proposed text is written into the bullet's
+        `variants[<archetype>]` (or into `summaries.variants`) in the tracked
+        YAML, with a comment recording that it was proposed and by whom, and
+        every future run for that archetype prints it.
+
+        Only the user decides this. Do not call it on your own initiative:
+        propose, show the guardrail verdict and the diff, and let the person
+        whose resume it is say yes. A proposal the guardrail refused cannot be
+        accepted at all.
+        """
+        return _proposal_payload(self.service.accept_proposal(proposal_id))
+
+    @_guard
+    def ats_reject_proposal(
+        self, proposal_id: str, reason: str | None = None
+    ) -> dict[str, Any]:
+        """Reject a proposal, with the reason in the user's words.
+
+        Nothing is written to the index. The proposal is kept as rejected: what
+        was refused, and why, is the record that makes the guardrail worth
+        having.
+        """
+        return _proposal_payload(self.service.reject_proposal(proposal_id, reason))
 
 
 #: Every tool :class:`ToolSet` implements, in registration order.
@@ -752,6 +832,10 @@ TOOLS: tuple[str, ...] = (
     "ats_followups",
     "ats_eval",
     "ats_propose_variant",
+    "ats_propose_summary",
+    "ats_proposals",
+    "ats_accept_proposal",
+    "ats_reject_proposal",
 )
 
 #: Tools a plain ``ats-tailor mcp`` does not register at all, and the flag that
@@ -768,19 +852,64 @@ DEFAULT_TOOLS: tuple[str, ...] = tuple(
     name for name in TOOLS if name not in GATED_TOOLS)
 
 
+def _proposal_row(proposal) -> dict[str, Any]:
+    """One proposal without its diff — the shape a list of them prints."""
+    payload = proposal.model_dump(mode="json", exclude={"guardrail"})
+    verdict = proposal.guardrail
+    payload["guardrail"] = {
+        "ok": bool(verdict and verdict.ok),
+        "summary": verdict.summary() if verdict else "unchecked",
+        "violations": [v.model_dump() for v in (verdict.violations if verdict else [])],
+    }
+    return payload
+
+
+def _proposal_payload(proposal) -> dict[str, Any]:
+    """One proposal in full, diff included, plus the one-line verdict.
+
+    ``ok`` is the *call's* success, not the guardrail's: an agent that reads it
+    as "the proposal passed" would accept a refused rewrite, so the verdict is
+    spelled out separately and the violations come with it.
+    """
+    row = _proposal_row(proposal)
+    if proposal.guardrail is not None:
+        row["guardrail"]["diff"] = proposal.guardrail.diff
+    return {
+        "ok": True,
+        "proposal": row,
+        "guardrail_ok": bool(proposal.guardrail and proposal.guardrail.ok),
+        "next": (
+            "ask the user, then ats_accept_proposal / ats_reject_proposal"
+            if proposal.status == "pending" and proposal.guardrail
+            and proposal.guardrail.ok else
+            "fix the violations and propose again"
+            if proposal.status == "pending" else f"already {proposal.status}"
+        ),
+    }
+
+
 def _render_trace(data: Mapping[str, Any]) -> str:
     """The greedy trace as lines: what was picked, for how much, for what."""
     trace = (data.get("selection") or {}).get("trace") or data.get("trace") or []
     requirements = {
         str(r.get("id")): str(r.get("text", "")) for r in data.get("requirements") or []
     }
+    # Which claims reached the page in an accepted variant's words rather than
+    # the index's: the trace is where a reviewer asks "why this bullet", and
+    # "because it was rephrased for this archetype" is part of the answer.
+    variants = {
+        str(row.get("bullet_id")): str(row.get("archetype"))
+        for row in data.get("variants") or []
+    }
     lines = [f"{len(trace)} step(s); the order the solver reached for each claim", ""]
     for position, step in enumerate(trace, start=1):
         opened = step.get("opened_group")
+        variant = variants.get(str(step.get("claim_id")))
         head = (
             f"{position:>3}. {step.get('claim_id')}  gain {float(step.get('gain', 0)):.4f}"
             + (f"  [opens {opened}]" if opened else "")
             + ("  [repair]" if step.get("repair") else "")
+            + (f"  [variant: {variant}]" if variant else "")
         )
         lines.append(head)
         for pair in step.get("covered") or []:

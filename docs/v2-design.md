@@ -324,7 +324,9 @@ after it:
   failing to start.
 
 **LLM provider interface** (`ats_tailor/llm/provider.py`): `extract(jd)`,
-`rerank(requirement, claims)`, `propose_variant(bullet, archetype)`.
+`rerank(requirement, claims)`, `propose_variant(bullet, archetype,
+requirements, **context)`, `propose_summary(summary, archetype, title,
+allowed)`.
 Providers: `ollama`, `lmstudio`, `mlx`, `none` (deterministic fallbacks),
 `external` (results are supplied through the service — used by the MCP so
 the driving agent is the LLM). No step in the pipeline calls a model
@@ -359,6 +361,8 @@ but never be used by two at once.
 `ats_healthcheck`, `ats_list_jds`, `ats_add_jd`, `ats_extract_requirements`,
 `ats_set_requirements`, `ats_tailor`, `ats_get_run`, `ats_override`,
 `ats_compile`, `ats_index_get`, `ats_index_put`, `ats_propose_variant`,
+`ats_propose_summary`, `ats_proposals`, `ats_accept_proposal`,
+`ats_reject_proposal`,
 `ats_eval`, plus from the `ai-job-search` lessons: `ats_fit(jd)` (cheap
 triage: gates + upper-bound requirement coverage the index *could* reach,
 strengths/gaps — before any tailoring; batchable over many JDs),
@@ -424,7 +428,7 @@ laptop measures.
 | 3c | **Delivered.** LLM provider interface (`ollama|lmstudio|mlx|none|external`), requirement extraction + gates, alias-aligned surface forms in rendering, summary variants + target title, v2 becomes the default engine | 3b |
 | 4a | **Delivered.** `service.py` (the one in-process API), stdio MCP server (19 tools by default, 20 with `--allow-eval`), `fit` / `jd add` / `review-pack` CLI commands, `AGENTS.md` | 3 |
 | 4b | **Delivered.** Textual TUI (4 screens), `serve`, `ATS_LATEX_ENGINE`, Dockerfile/Compose | 4a |
-| 5 | Variant proposals + summary polish with metric guardrail (agent via MCP or local model), approval in TUI | 4 |
+| 5 | **Delivered.** Variant proposals + summary polish with metric guardrail (agent via MCP or local model), approval in TUI | 4 |
 
 ### 3a result (2026-08-26)
 
@@ -818,3 +822,111 @@ Deviations from `docs/plans/phase-4b.md`, all deliberate:
   an image; something has to rasterise the PDF first. Both absences degrade to
   a message naming the PNG on disk.
 
+
+### 5 result (2026-08-26)
+
+`ats_tailor/guardrail.py` (484 lines of pure functions), a `proposals` table
+(store migration 3), `Provider.propose_variant` / `propose_summary` with two
+prompt templates, variant-aware claim building, five MCP tools, three CLI
+commands, the TUI's `v` panel, and `eval --no-variants` / `--variants-report`.
+58 new tests; the suite is 413 passing (427 with `ATS_SMOKE=1`).
+
+The pipeline's numbers are unchanged, by construction and by measurement: no
+bullet in the index carried a variant when the sweep ran, so
+`ats-tailor eval --engine v2 --provider none` reproduced
+`eval/30a5cd1d5a71.json` with **zero differing per-JD fields** and every mean
+delta `+0.000` — must 75%, nice 34%, context 51%, parse 14/14, 1.00 pages, 0
+exclusion violations. The result is filed as `eval/f3056afb53e7.json` (the
+config hash moves because `code_hash` covers the new modules) and supersedes
+`30a5cd1d5a71` as the current baseline. The only shape change in the JSON is
+`options.variants: true`.
+
+Seven things had to be decided rather than assumed:
+
+- **A rule the model is told about is still a rule that is checked.** The
+  prompt carries the guardrail's rules verbatim — the metrics that must
+  survive, the technologies that must stay, the ones the item is allowed to
+  add — because a local 8B model that is not told will not comply. It is
+  checked afterwards anyway, because a model that *is* told still will not
+  always. Neither half is redundant: the prompt is what makes proposals usable,
+  the check is what makes them safe.
+- **"No new technology" needs two detectors, not one.** The index alias map
+  catches a real technology borrowed from somewhere else in the resume
+  ("Kubernetes" in a project that has never used it); it cannot catch a word
+  the index has never heard of. `gap_terms` — the same detector that tells the
+  coverage report a posting asks for something nobody has — catches that when
+  it is pointed at the proposal instead of the posting. Two rules, one
+  violation type, and the second one is what stops a model inventing "Consul".
+- **Every word of the source bullet is known, punctuation included.** The first
+  version passed the source *text* into the gap detector, which splits on
+  whitespace and slashes only: a source saying "Docker, TLS, and Flutter" left
+  `tls,` in the known set and `TLS` outside it, so a faithful rephrase was
+  refused for naming a technology it had not moved. Known vocabulary is
+  tokenised now, keeping the punctuation technology names are spelled with
+  (`C++`, `.NET`, `CI/CD`) and dropping the punctuation sentences are.
+- **A sentence-initial capital is grammar, not a proper noun.** The gap
+  detector treats any capitalised word as a candidate technology, which on a
+  résumé bullet means the leading verb ("Designed", "Architected") is one. The
+  proposal's first word is therefore known by construction. A technology in
+  that position is still caught by the alias-map rule whenever the index knows
+  it at all, which is the case that matters.
+- **Metrics are read from the text, not only from the field.** `metrics:` is
+  filled in by the migration and by `index_put`, and a hand-edited bullet may
+  carry a figure nobody recorded. The guardrail unions the field with
+  `migrate.find_metrics(bullet.text)` — the same reader — so "Cut p99 latency
+  by 40%" is guarded whether or not anyone typed `40%` into the schema. Bare
+  years stay excluded: a date is not a quantity.
+- **A variant is substituted where an override is, so it can change the
+  decision.** `claims_from_index(archetype=…)` emits the variant as the claim's
+  text, so the variant's words are what gets embedded, costed and rewarded by
+  the keyword-in-context bonus. Measured on a scratch copy of the real index:
+  accepting a *second* DevOps variant changed which CareHaven bullet the solver
+  picked for `jd/cpf.txt` — the longer variant cost a line and the greedy spent
+  it elsewhere. A variant that only reached the renderer would have been a
+  cosmetic feature with a scoring bug hiding behind it.
+- **The variants report attributes per archetype and credits per selection.**
+  Variants of one archetype are on or off together, and isolating one bullet
+  would cost a sweep per bullet. Each posting of a variant's archetype is
+  therefore run twice, and the delta is credited to the variants the run
+  actually *selected* — a variant the solver never reached for did not move the
+  number, whatever else changed. It found a real negative on the scratch index
+  immediately: a `virtualkopis.r2` variant that spelled out "containerised …
+  Docker images … Prometheus dashboards" cost CPF 25 points of context rate
+  (100% → 75%) while must coverage stayed at 100%. That is the report working:
+  the variant reads better and measures worse.
+
+Deviations from `docs/plans/phase-5.md`, all deliberate:
+
+- **The TUI's proposal panel is a modal, not a side pane.** The Tailor screen
+  is three panes at 90 columns and already hides the third below that; a fourth
+  would have nowhere to go. Every other "collect one answer" surface in the app
+  is a modal, and the keys the plan asks for (`a`/`d`/`e`, plus `ctrl+s` to
+  re-check an edit) are the same keys either way.
+- **`propose_variant` takes `jd_slug` as well as `requirement_ids`.** A
+  requirement id (`req-3`) means nothing without the posting it was extracted
+  from. With a slug the ids resolve against that posting; without one the
+  recorded runs are searched newest-first, which is what the TUI means, where
+  the ids on screen came from the run that is open. An id nothing resolves is
+  dropped rather than handed to a model as the literal string "req-3".
+- **A rejection's reason is a column, not a side file.** `proposals.note`
+  exists from the first migration. The alternative was writing it into the
+  gitignored JD metadata sidecar, where nothing else about a proposal lives.
+- **`--no-variants` turns off the summary variant too.** Since this phase a
+  summary variant is an accepted proposal like any other, and a flag that
+  measured the page without the bullets' variants but with the summary's would
+  be measuring neither state.
+- **The summary's corpus is summaries, highlights and selected claims — not
+  the skills taxonomy.** A skill the index lists and no bullet demonstrates is
+  a line on the Skills row, not a sentence about what the candidate has done.
+  With no run of the posting on record, every visible bullet is the corpus,
+  which is the superset a first application has to be judged against.
+- **The eval record gained no field.** The variants report needs each run's
+  archetype and the variants it used; both are read from the run's own
+  `selection.json` rather than added to the eval JSON, so a sweep of an index
+  with no variants stays comparable field-for-field with every baseline taken
+  before this phase existed.
+- **`ats_propose_variant` answers `ok: true` for a proposal the guardrail
+  refused.** `ok` is whether the *call* worked; `guardrail_ok` is whether the
+  proposal passed. An agent that conflated them would accept a refused
+  rewrite, so the two are separate keys and the violations come with the
+  answer.
