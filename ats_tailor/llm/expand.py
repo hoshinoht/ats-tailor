@@ -1,10 +1,22 @@
-"""LLM keyword expansion and coverage gap detection."""
+"""v1's keyword expansion and coverage-gap detection — behaviour frozen.
+
+``--llm`` on the v1 engine means what it has always meant: ask a local model
+for technologies a posting implies but never spells out, and append them to the
+JD text before scoring. The v2 engine gives ``--llm`` a different meaning (use
+the configured provider for *requirement extraction*), which is why the two
+live in separate modules rather than in one function with a flag.
+
+Re-exported from :mod:`ats_tailor.llm` so every existing import site is
+unchanged.
+"""
 
 import json
 import re
 import sys
+from urllib.error import URLError
 
-from . import config
+from .. import config
+from .backends import _generate, _parse_json_array
 
 _GAP_STOPWORDS = {
     "API", "CEO", "CTO", "CRM", "ERP", "HR", "IT", "KPI", "MBA", "OKR",
@@ -59,141 +71,6 @@ _GAP_STOPWORDS = {
 }
 
 
-def _ollama_generate(model_name, prompt, label="LLM", temperature=None):
-    """Send a single prompt to ollama and return the raw response text."""
-    from urllib.request import urlopen, Request
-    from urllib.error import URLError
-
-    opts = {"num_predict": 512, "num_ctx": config.LLM_NUM_CTX}
-    if temperature is not None:
-        opts["temperature"] = temperature
-    payload = json.dumps(
-        {"model": model_name, "prompt": prompt, "stream": False,
-         "options": opts, "think": False}).encode()
-    req = Request("http://localhost:11434/api/generate", data=payload,
-                  headers={"Content-Type": "application/json"})
-    with urlopen(req, timeout=600) as resp:
-        data = json.loads(resp.read())
-        raw = data["response"]
-        p_tok = data.get("prompt_eval_count", 0)
-        g_tok = data.get("eval_count", 0)
-        print(f"  {label} tokens: {p_tok} prompt + {g_tok} generated "
-              f"= {p_tok + g_tok} / {config.LLM_NUM_CTX} ctx",
-              file=sys.stderr)
-    return raw
-
-
-# Module-level cache for MLX model/tokenizer (avoid reloading between passes)
-_mlx_model_cache = {}
-
-
-def _mlx_generate(model_name, prompt, label="LLM", temperature=None):
-    """Generate text using mlx-lm. Raises ImportError if mlx-lm is not installed."""
-    import mlx_lm
-
-    if model_name not in _mlx_model_cache:
-        print(f"  Loading MLX model {model_name}...", file=sys.stderr)
-        model, tokenizer = mlx_lm.load(model_name)
-        _mlx_model_cache[model_name] = (model, tokenizer)
-
-    model, tokenizer = _mlx_model_cache[model_name]
-    kwargs = {"prompt": prompt, "max_tokens": 512, "verbose": False}
-    if temperature is not None:
-        kwargs["temp"] = temperature
-    response = mlx_lm.generate(model, tokenizer, **kwargs)
-    # Estimate token counts for logging
-    p_tok = len(tokenizer.encode(prompt))
-    g_tok = len(tokenizer.encode(response))
-    print(f"  {label} tokens: {p_tok} prompt + {g_tok} generated",
-          file=sys.stderr)
-    return response
-
-
-def _lmstudio_generate(model_name, prompt, label="LLM", temperature=None):
-    """Send a prompt to LM Studio's OpenAI-compatible API."""
-    from urllib.request import urlopen, Request
-    from urllib.error import URLError
-
-    body = {"messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 2048, "temperature": temperature if temperature is not None else 0.3}
-    if model_name:
-        body["model"] = model_name
-    payload = json.dumps(body).encode()
-    url = f"{config.LMSTUDIO_URL}/v1/chat/completions"
-    req = Request(url, data=payload,
-                  headers={"Content-Type": "application/json"})
-    with urlopen(req, timeout=600) as resp:
-        data = json.loads(resp.read())
-        msg = data["choices"][0]["message"]
-        # Prefer separated content (LM Studio reasoning_content setting)
-        raw = msg.get("content") or ""
-        reasoning = msg.get("reasoning_content") or ""
-        if not raw and not reasoning:
-            raw = ""
-        elif not raw and reasoning:
-            # reasoning_content not separated — content has everything
-            pass
-        # Strip <think>…</think> if content wasn't separated
-        if "<think>" in raw:
-            if "</think>" in raw:
-                raw = re.sub(r"<think>.*?</think>\s*",
-                             "", raw, flags=re.DOTALL)
-            else:
-                raw = re.sub(r"<think>.*", "", raw, flags=re.DOTALL)
-        usage = data.get("usage", {})
-        p_tok = usage.get("prompt_tokens", 0)
-        g_tok = usage.get("completion_tokens", 0)
-        thinking_note = f" ({g_tok - len(raw.split())} thinking)" if reasoning else ""
-        print(f"  {label} tokens: {p_tok} prompt + {g_tok} generated{thinking_note}",
-              file=sys.stderr)
-    return raw
-
-
-def _generate(model_name, prompt, label="LLM", temperature=None):
-    """Dispatch to MLX, LM Studio, or Ollama based on config.LLM_BACKEND."""
-    backend = config.LLM_BACKEND
-
-    if backend == "mlx":
-        return _mlx_generate(config.MLX_MODEL, prompt, label, temperature)
-    elif backend == "lmstudio":
-        return _lmstudio_generate(model_name, prompt, label, temperature)
-    elif backend == "ollama":
-        return _ollama_generate(model_name, prompt, label, temperature)
-    else:  # auto
-        from urllib.error import URLError
-        try:
-            return _mlx_generate(config.MLX_MODEL, prompt, label, temperature)
-        except ImportError:
-            print("  MLX not available, trying LM Studio",
-                  file=sys.stderr)
-        except Exception as e:
-            print(f"  MLX failed ({e}), trying LM Studio",
-                  file=sys.stderr)
-        try:
-            return _lmstudio_generate(model_name, prompt, label, temperature)
-        except (URLError, OSError):
-            print("  LM Studio not available, falling back to Ollama",
-                  file=sys.stderr)
-        except Exception as e:
-            print(f"  LM Studio failed ({e}), falling back to Ollama",
-                  file=sys.stderr)
-        return _ollama_generate(model_name, prompt, label, temperature)
-
-
-def _parse_json_array(raw):
-    """Extract a JSON array from LLM output (may be wrapped in fences/tags)."""
-    match = re.search(r"\[.*\]", raw, re.DOTALL)
-    if not match:
-        return None
-    try:
-        terms = json.loads(match.group())
-        if isinstance(terms, list):
-            return [str(t) for t in terms if isinstance(t, str)]
-    except (json.JSONDecodeError, ValueError):
-        pass
-    return None
-
-
 def expand_jd_with_llm(jd_text, model_name, categories=None):
     """Call ollama REST API to expand JD text into implied keywords/technologies.
 
@@ -203,8 +80,6 @@ def expand_jd_with_llm(jd_text, model_name, categories=None):
     When ATS_LLM_TWO_PASS=true, uses a two-pass strategy: first infers
     relevant domains, then expands keywords scoped to those domains.
     """
-    from urllib.error import URLError
-
     try:
         if categories and config.LLM_TWO_PASS:
             return _expand_two_pass(jd_text, model_name, categories)

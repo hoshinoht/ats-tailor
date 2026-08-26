@@ -110,11 +110,16 @@ def render_resume(company, role, profile, education, experience, projects, skill
 
     ``target_title`` appends an honest target statement to the summary
     (``Targeting: <title>.``), which is how the JD's job title earns its one
-    appearance on the page — see ``docs/v2-design.md`` §2.
+    appearance on the page — see ``docs/v2-design.md`` §2. It is appended once:
+    a summary that already carries the statement (a variant that names the role,
+    a re-render inside the page-fit loop) is left alone, because the same words
+    twice is the stuffing the ATS check warns about.
     """
     if target_title and summary and summary.get("summary"):
-        summary = {**summary,
-                   "summary": f"{summary['summary'].rstrip()} Targeting: {target_title}."}
+        existing = str(summary["summary"]).rstrip()
+        statement = f"Targeting: {target_title}."
+        if statement.lower() not in existing.lower():
+            summary = {**summary, "summary": f"{existing} {statement}"}
     env = Environment(
         loader=FileSystemLoader(str(PKG_DIR)),
         block_start_string="((*",

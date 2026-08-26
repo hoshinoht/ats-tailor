@@ -35,7 +35,8 @@ ats-tailor <command> [options]
 | `labels from-run <dir\|id>` | Merge a run's pins and exclusions into its label file. |
 | `sync [--index DIR] [--embed]` | Bring the runtime store in line with the index; `--embed` pre-computes the embeddings a run would otherwise wait for. |
 | `override <out_dir> …` | Edit the per-run `overrides.yaml` next to a run's output; `--show` prints it. |
-| `runs list\|show\|status\|note\|quiet` | The application tracker. |
+| `runs list\|show\|status\|note\|quiet` | The application tracker. A `⚠` in the first column means the posting's gates said something. |
+| `jd show <jd> [--provider …] [--edit]` | Read a posting into gates and weighted requirements and print them, before any run. `--edit` opens the profile in `$EDITOR` and stores it as the edited one, which outranks every later extraction. |
 
 `python -m ats_tailor.tailor …` remains supported and is unchanged.
 
@@ -66,7 +67,9 @@ python -m ats_tailor.tailor \
 | `--rerank`      | off                          | Re-score top candidates with a cross-encoder     |
 | `--no-rerank`   | off                          | Disable env-enabled cross-encoder reranking      |
 | `--check`       | off                          | Compile the PDF and run the ATS check afterwards |
-| `--engine`      | `v1` (env `ATS_ENGINE`)      | `v1` ranks whole items; `v2` covers parsed requirements |
+| `--engine`      | `v2` (env `ATS_ENGINE`)      | `v2` covers parsed requirements; `v1` is the legacy whole-item ranking |
+| `--provider`    | env `ATS_LLM_PROVIDER`       | who reads the posting in v2: `auto`, `ollama`, `lmstudio`, `mlx`, `none`, `external` |
+| `--reextract`   | off                          | v2: ignore any cached extraction and read the posting again |
 
 ## Configuration
 
@@ -80,6 +83,11 @@ cp .env.example .env
 | --------------------------- | ----------------------------- | --------------- |
 | `ATS_EMBED_MODEL`           | `all-MiniLM-L12-v2`           | `--model`       |
 | `ATS_LLM_MODEL`             | `qwen3.5:4b`                  | `--llm`         |
+| `ATS_LLM_PROVIDER`          | `auto`                        | `--provider`    |
+| `ATS_PROMPT_VERSION`        | `extract-1`                   | —               |
+| `ATS_LLM_TIMEOUT`           | `600`                         | —               |
+| `ATS_LLM_PROBE_TIMEOUT`     | `1.5`                         | —               |
+| `ATS_OLLAMA_URL`            | `http://localhost:11434`      | —               |
 | `ATS_LLM_BACKEND`           | `auto`                        | `--llm-backend` |
 | `ATS_LLM_NUM_CTX`           | `4096`                        | —               |
 | `ATS_LLM_TEMPERATURE`       | `0.3`                         | —               |
@@ -89,6 +97,8 @@ cp .env.example .env
 | `ATS_LMSTUDIO_URL`          | `http://localhost:1234`       | —               |
 | `ATS_MLX_MODEL`             | `mlx-community/Qwen3-8B-4bit` | —               |
 | `ATS_RERANK`                | `false`                       | `--rerank`      |
+| `ATS_RERANK_MODEL`          | `cross-encoder/ms-marco-MiniLM-L-6-v2` | —      |
+| `ATS_RERANK_TOP_K`          | `5`                           | —               |
 | `ATS_MAX_EXPERIENCE`        | `3`                           | —               |
 | `ATS_MIN_EXPERIENCE`        | `2`                           | —               |
 | `ATS_MAX_PROJECTS`          | `4`                           | —               |
@@ -104,7 +114,10 @@ cp .env.example .env
 | `ATS_CHARS_PER_BULLET_LINE` | `80`                          | —               |
 | `ATS_MAX_PAGE_LINES`        | `72`                          | —               |
 | `ATS_SECTION_PRIORITY`      | `experience`                  | —               |
-| `ATS_ENGINE`                | `v1`                          | `--engine`      |
+| `ATS_ENGINE`                | `v2`                          | `--engine`      |
+| `ATS_TARGET_TITLE`          | `true`                        | — (v2)          |
+| `ATS_MAX_REQUIREMENTS`      | `40`                          | — (v2)          |
+| `ATS_FALLBACK_REQ_WEIGHT`   | `0.5`                         | — (v2)          |
 | `ATS_TAU`                   | `0.1`                         | — (v2)          |
 | `ATS_MU`                    | `0.3`                         | — (v2)          |
 | `ATS_BETA`                  | `3.0`                         | — (v2)          |
@@ -126,7 +139,88 @@ is filled with the best remaining role whatever it scores, which is what v1 did
 too. To leave a weak entry off the page, lower `ATS_MAX_EXPERIENCE` (or
 `ATS_MAX_PROJECTS`), or exclude the item for that posting in its label file.
 
-## LLM keyword expansion
+## Providers (v2)
+
+Nothing in the v2 pipeline calls a model. It calls a **provider**, and a
+provider is allowed to answer "nothing" — in which case the deterministic paths
+run and the resume is the same one a machine with no model would produce.
+
+| Provider | What it is |
+| -------- | ---------- |
+| `none` | Every method returns `None`. The deterministic parser reads the posting. |
+| `ollama` / `lmstudio` / `mlx` | A local model, through the backends v1 already used. |
+| `external` | Results supplied from outside — an agent through the MCP server (Phase 4), or a profile already in the store. Never calls a model. |
+| `auto` | Probe `mlx` → `lmstudio` → `ollama` (short timeouts, and a server with no model loaded counts as absent), then fall back to `none` with one warning. |
+
+```bash
+ats-tailor tailor --jd jd/cpf.txt --company cpf --role sre --llm          # the configured provider
+ats-tailor tailor --jd jd/cpf.txt --company cpf --role sre --provider ollama
+ats-tailor tailor --jd jd/cpf.txt --company cpf --role sre --no-llm       # force `none`
+```
+
+With **neither** flag the provider is `none` unless `ATS_LLM_PROVIDER` names one
+outright: `auto` is an invitation to go looking for a model, and an invitation
+is not an instruction, so a plain `ats-tailor tailor` stays fast and
+reproducible. `--llm` on v1 keeps its old meaning (keyword expansion); on v2 it
+means "let the configured provider read the posting".
+
+### Requirement extraction and gates
+
+`jd show` prints what the next run of the same posting will use:
+
+```bash
+ats-tailor jd show jd/cpf.txt                 # deterministic reading
+ats-tailor jd show jd/cpf.txt --provider ollama --reextract
+ats-tailor jd show jd/cpf.txt --edit          # correct it; the edit wins from now on
+```
+
+Three rules govern what comes out:
+
+1. **The deterministic parser always runs**, model or no model. Requirements it
+   produced whose terms the extraction never mentions are appended at
+   `ATS_FALLBACK_REQ_WEIGHT` (0.5) — a model that tidies a posting into eight
+   lines has thrown away the ninth thing it asked for.
+2. **A human edit outranks everything**, including a fresh `--reextract`.
+3. **The posting is data, never instruction.** The prompt wraps it in an
+   explicit trust boundary, and whatever comes back is validated by pydantic
+   before anything reads it.
+
+Extractions are cached on `(jd hash, provider, prompt version)`, so a model
+sweep is paid for once and is reproducible afterwards. The deterministic profile
+is stored but never served from the cache: it costs milliseconds to recompute,
+and a cached copy would outlive the parser that made it.
+
+**Gates** are hard filters — citizenship and clearance, a language the profile
+does not declare, relocation, a closing date, a seniority bar. They are printed
+*before* any scoring, quoted from the posting, and written into
+`match_report.md` and the run record. A gate never aborts a run: the user
+decides. Where a model says `pass` and the posting's own words say otherwise,
+the regexes downgrade it to `flag` and attach the quote.
+
+### Alias-aligned skills
+
+An ATS matches strings. Where the posting writes `K8s` and the index says
+`Kubernetes`, the skills line renders `Kubernetes (K8s)`; where the posting
+writes `Amazon Web Services` and the index says `AWS`, it renders
+`Amazon Web Services (AWS)`; where it writes `Containerization` for what the
+index calls `Docker`, it renders `Docker (Containerization)`. Both forms once,
+never a third time, and no term is printed twice across the section — the
+canonical keyword never leaves the page to make room for the posting's synonym.
+**Bullets are never rewritten** — that is Phase 5, behind a metric guardrail.
+
+The Summary takes `summaries.variants[<archetype>]` when the index has one for
+the archetype the posting leans on, and the posting's job title is appended once
+as an honest target statement (`… Targeting: Site Reliability Engineer Intern.`,
+`ATS_TARGET_TITLE`).
+
+### Reranking
+
+`ATS_RERANK=true` re-scores the top `ATS_RERANK_TOP_K` claims per requirement
+with a cross-encoder; `ATS_RERANK=llm` asks the provider instead (one listwise
+prompt per requirement). Both are off by default on evidence, not caution — see
+`docs/v2-design.md` §8 for what the cross-encoder measured.
+
+## LLM keyword expansion (v1)
 
 Tag overlap scoring uses exact string matching — if the JD says "AI Engineer" it won't match an `ats_tag` like "Deep Learning" because the literal string isn't there. The `--llm` flag sends the JD to a local [ollama](https://ollama.com) model to infer implied technical keywords, which are appended to the matching pool before scoring.
 
@@ -168,6 +262,11 @@ If the backend is unreachable the pipeline prints a warning and continues withou
 Expanded terms appear in the console output and in the `match_report.md` under **LLM-Expanded Keywords**.
 
 If `ATS_LLM_EXPAND=true` is set in the environment, pass `--no-llm` to force a non-LLM run.
+
+This whole section is about `--engine v1`. The v2 engine does not expand
+keywords: putting invented terms in front of the requirement parser would tier
+and weight text the posting never contained. See **Providers** above for what
+`--llm` does there.
 
 ## Output
 
@@ -374,7 +473,9 @@ ranking:                    # optional full preference order
 
 ```bash
 ats-tailor eval --index index --labels-dir labels --jd-dir jd --out eval
-ats-tailor eval --engine v2 ...      # score the v2 engine instead
+ats-tailor eval --engine v1 ...              # score the legacy engine instead
+ats-tailor eval --provider ollama ...        # let a model read the postings
+ats-tailor eval --provider ollama --reextract  # ... and read them again
 ```
 
 Runs the pipeline for every label into `eval/runs/<slug>/`, compiles, checks,
@@ -393,9 +494,14 @@ A metric with nothing to measure prints `—` and is left out of the mean. A
 label whose JD file is not on this machine is skipped with a note and listed
 under the table — labels are tracked, postings are local, so a missing one is
 normal rather than a failed sweep.
+Because extractions are cached on `(jd hash, provider, prompt version)`, a
+`--provider ollama` sweep pays for the model once and is reproducible from the
+store afterwards; a provider that turns out to be unreachable falls back per
+posting and records `provider: fallback` for that run.
+
 Results are written to `eval/<config-hash>.json`, where the hash covers every
 `ATS_*` setting, the embedding model, the index content, the selected engine,
-and both packages' sources — so two runs are only comparable when the hash says they are, and
+the provider and prompt version that read the postings, and both packages' sources — so two runs are only comparable when the hash says they are, and
 editing the scorer changes the hash even before it is committed. The git HEAD
 is recorded alongside for provenance but not hashed, so committing unchanged
 code does not rename a baseline:
@@ -491,8 +597,9 @@ To start with your own data, copy `examples/`, fill in your details, and run aga
 
 ## Scoring
 
-Two engines. `--engine v1` (the default) ranks whole items against the posting;
-`--engine v2` parses the posting into requirements and covers them. Both render
+Two engines. `--engine v2` (the default since Phase 3c) parses the posting into
+requirements and covers them; `--engine v1` is the legacy path, which ranks
+whole items against the posting. Both render
 the same template and pass the same ATS check.
 
 ### `--engine v2` — requirement coverage
@@ -505,7 +612,14 @@ maximise  Σ_r w_r · softpool_τ(M[r, S])   requirement coverage (submodular)
 subject to  lines(S) ≤ budget, and the ATS_MIN/MAX_* limits per section
 ```
 
-1. **Requirements.** The posting is chunked and each chunk tiered by the
+0. **Gates.** Before anything is scored, the posting's hard filters are read
+   and printed with the sentence each came from (see **Providers** above).
+   Nothing is blocked; the point is that a citizenship clause is seen before the
+   afternoon is spent, not after.
+1. **Requirements.** A provider may read the posting into requirements, gates,
+   a title and an archetype; with `none` (the default) it is read by the
+   deterministic parser below, whose output is also merged into any model's as a
+   safety net. The posting is chunked and each chunk tiered by the
    heading above it (`ats-tailor check` uses the same tiering, so the metric and
    the objective agree by construction): a requirements heading gives `must`,
    a "nice to have" heading gives `nice`, anything else is a `responsibility`
@@ -533,6 +647,10 @@ subject to  lines(S) ≤ budget, and the ATS_MIN/MAX_* limits per section
    clear the floor.
 5. **Page fit.** Render, compile, count pages; if it spilled, cut the budget by
    4 lines and re-solve, up to three times.
+6. **Surface forms.** Skills are labelled in the posting's own spelling
+   (`Kubernetes (K8s)`), the Summary takes the archetype's variant when the
+   index has one, and the posting's job title is appended once as a target
+   statement. Bullets are never rewritten.
 
 `match_report.md` becomes a coverage ledger: every requirement with its kind,
 weight, best claim and coverage; the greedy trace with what each pick covered;

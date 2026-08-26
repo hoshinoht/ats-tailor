@@ -39,6 +39,15 @@ class RunResult:
     pages: int | None = None
     budget: float | None = None
     iterations: int = 0
+    #: v2 only — what reading the posting produced before any scoring: the
+    #: hard filters, the title the Summary targets, the archetype the summary
+    #: variant was chosen by, and who did the reading.
+    gates: dict[str, Any] = field(default_factory=dict)
+    jd_title: str | None = None
+    archetype: str | None = None
+    provider: str | None = None
+    #: Whether the profile came out of the store rather than being read again.
+    provider_cached: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -62,4 +71,9 @@ class RunResult:
             payload["budget"] = self.budget
             payload["pages"] = self.pages
             payload["iterations"] = self.iterations
+            payload["gates"] = self.gates
+            payload["jd_title"] = self.jd_title
+            payload["archetype"] = self.archetype
+            payload["provider"] = self.provider
+            payload["provider_cached"] = self.provider_cached
         return payload

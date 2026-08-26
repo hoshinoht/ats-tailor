@@ -3,24 +3,23 @@
 The matching core takes models as injected objects, so everything model-shaped
 lives here: loading (cached per process, because ``eval`` runs the pipeline a
 dozen times), row normalisation, the query/passage prefixes asymmetric models
-need, and the on-disk vector cache.
+need, and the vector cache in front of them.
+
+The cache is the runtime store (:func:`encode_store`); the ``.npy`` directory
+cache this module also carried through Phase 3a is gone — nothing called it
+once the store landed, and a second cache with its own key scheme is a second
+way for two runs to disagree.
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
-from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 
 from .config import EMBED_MODEL, HF_TOKEN
-from .loaders import (
-    _text_hash,
-    build_cache_key,
-    load_cached_embeddings,
-    save_cached_embeddings,
-)
+from .loaders import _text_hash
 
 #: Model-family → (query prefix, passage prefix). Matched as a substring of the
 #: model name, since the same family ships under many repo paths.
@@ -98,7 +97,7 @@ def encode_store(
     ``kind`` is one label for every text, or one label per text when a batch
     mixes them (the pipeline embeds bullets and skills in a single call).
 
-    The v2 replacement for :func:`encode_cached`. Where the ``.npy`` cache keys
+    Where the ``.npy`` cache v2 used to keep keyed
     on a hash of the *whole list*, so editing one bullet re-encoded every
     claim, the store keys on each text: a run after an edit pays for the edit
     only, and ``sync --embed`` can fill the cache ahead of any run.
@@ -132,37 +131,3 @@ def encode_store(
         cached.update(store.get_embeddings(missing, embedder.model_name))
 
     return np.vstack([np.asarray(cached[h], dtype=float) for h in hashes])
-
-
-def encode_cached(
-    embedder: SentenceTransformerEmbedder,
-    texts: Sequence[str],
-    cache_dir: str | Path,
-    kind: str,
-    prefix: str = "",
-    schema_version: str = "v2m1",
-) -> np.ndarray:
-    """Encode ``texts`` once per (model, content) pair, caching the matrix on disk.
-
-    The key hashes the prefixed texts, so switching a model's prefixes or
-    editing a single bullet invalidates the entry rather than silently
-    returning vectors for the previous wording.
-
-    The ``.npy``-backed encoder, kept for callers that have a directory rather
-    than a store. The v2 pipeline moved to :func:`encode_store` in Phase 3b;
-    v1's own caching predates this function and goes through
-    :mod:`ats_tailor.loaders` directly.
-    """
-    cache_dir = Path(cache_dir)
-    payload = [f"{prefix}{text}" for text in texts]
-    key = build_cache_key(kind, embedder.model_name, _text_hash("\n".join(payload)),
-                          schema_version)
-    cached = load_cached_embeddings(
-        cache_dir, key, expected_ndim=2, expected_rows=len(payload)
-    )
-    if cached is not None:
-        return np.asarray(cached, dtype=float)
-    vectors = embedder.encode(payload)
-    if len(payload):
-        save_cached_embeddings(cache_dir, key, vectors)
-    return vectors

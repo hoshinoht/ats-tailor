@@ -368,7 +368,7 @@ compose run --rm -it app ats-tailor tui` for the TUI, `ats-tailor serve`
 | 2 | `check` (parse + keyword coverage on PDF), labels format, `eval` baseline on v1 pipeline | 1 |
 | 3a | **Delivered.** `ats-match` core (types, BM25, RRF, greedy selection, metrics) in a uv workspace; adapter index→claims; deterministic requirement parser; v2 pipeline with compile loop behind `--engine v2`; eval parity with v1 | 1, 2 |
 | 3b | **Delivered.** SQLite runtime store (`entities`, `embeddings`, `jd_profiles`, `runs`, `run_notes`), `sync`, per-run `overrides.yaml` honoured by selection (pins/excludes/edited text/requirement edits), run records and the tracker, `labels from-run` | 3a |
-| 3c | LLM provider interface (`ollama|lmstudio|mlx|none|external`), requirement extraction + gates, alias-aligned surface forms in rendering, summary variants + target title, v2 becomes the default engine | 3b |
+| 3c | **Delivered.** LLM provider interface (`ollama|lmstudio|mlx|none|external`), requirement extraction + gates, alias-aligned surface forms in rendering, summary variants + target title, v2 becomes the default engine | 3b |
 | 4 | `service.py`, LLM provider interface, Textual TUI, MCP server, Dockerfile/Compose | 3 |
 | 5 | Variant proposals + summary polish with metric guardrail (agent via MCP or local model), approval in TUI | 4 |
 
@@ -482,3 +482,108 @@ Deviations from `docs/plans/phase-3b.md`, all deliberate:
   promise would hold for everything except the Certifications section.
 - `eval` passes `--no-record` rather than the tracker inspecting its caller. A
   sweep is measurement; the flag says so where it can be read.
+
+### 3c result (2026-08-26)
+
+`ats-tailor eval --engine v2 --provider none` over the same fourteen labelled
+JDs (`eval/30a5cd1d5a71.json`), against the Phase 3b baseline
+`eval/c353d77de549.json`:
+
+| metric | 3b | 3c | delta |
+|---|---|---|---|
+| must_coverage | 75.02% | 75.02% | +0.000 |
+| nice_coverage | 33.44% | 34.44% | **+0.010** |
+| context_rate | 51.43% | 51.43% | +0.000 |
+| parse_ok | 100% | 100% | +0.000 |
+| pages | 1.00 | 1.00 | +0.000 |
+| exclusion_violations | 0 | 0 | +0.000 |
+
+`--engine v1` reproduces the Phase 2 baseline exactly — every mean and every
+per-JD field identical to `d184bc9cec11` — so the default flip costs the legacy
+path nothing.
+
+Every selection, budget, requirement count and fit-iteration count is
+byte-identical to 3b: with `provider none` the extractor *is* the Phase 3a
+parser, and the two things that did move are both rendering. Five postings lost
+a `synonym-only` verdict — `Containerization` (cpf, infineon), `Dashboards`
+(hitachi), `Agentic AI` (razer), `K8s` (tencent) are now `covered`, in the
+posting's own spelling — and no term anywhere regressed. The single point of
+nice-coverage is `Robotics` on dConstruct, which reached the page through the
+target statement. Stuffing warnings are unchanged in number (40 across the
+corpus, before and after); six postings shift one term by one occurrence.
+
+No live model was reachable on this machine (`ollama list` is empty, `mlx-lm` is
+not installed, LM Studio is not running), so the `--provider ollama` arm of the
+exit criterion is **not** measured. The provider path is exercised by
+`FakeProvider` in `tests/test_phase3c.py`, and `--provider external` runs it
+end to end through the store.
+
+Five things had to be decided rather than assumed:
+
+- **A cached deterministic profile is a lie waiting to happen.** Extractions are
+  cached on `(jd_hash, provider, prompt_version)`, but the *parser's* profile is
+  stored and never read back: it costs milliseconds to recompute, and a cached
+  copy would outlive the parser that produced it — an eval that reports no
+  change after a scoring change is worse than one that reports the wrong change.
+  Its row is also not keyed on a prompt version (it used no prompt), so a prompt
+  bump cannot orphan a human's edit to it.
+- **The plan's language regex would have failed five of the fourteen postings.**
+  `proficien\w+ in (?P<lang>[A-Z]\w+)` reads "Proficiency in Python" as a
+  language requirement. The gate matches against a whitelist of natural
+  languages instead. A gate that cries wolf is a gate the user learns to skip,
+  and then the one real citizenship clause goes past unread.
+- **Alias alignment can print the same word twice.** A `SQL` skill aligned onto
+  a posting's "PostgreSQL" renders `PostgreSQL (SQL)` next to a `postgresql`
+  skill rendering `PostgreSQL`. Labels are therefore deduped by the *parts* they
+  put on the page, across the whole Skills section rather than per line.
+- **An aligned label keeps both names, never just the posting's.** The plan's
+  "any other alias → `jd_form`" was shipped, measured and reverted within the
+  phase: rendering CPF's "Containerization" *in place of* "Docker" satisfies the
+  posting at the cost of the better-known keyword, and an ATS that matches one
+  of them would have matched both. Every branch now emits a pair —
+  `Kubernetes (K8s)`, `Amazon Web Services (AWS)`, `Docker (Containerization)` —
+  and only the order differs, the acronym going in the brackets because the
+  expansion is what a human reads. With one exception, found by looking at what
+  the pair rule printed: when the index name already spells the posting's word
+  as a whole word ("Git / Version Control" for "Git", "LSTM / GRU" for "LSTM"),
+  the bracket is dropped — that is the same token twice on one line, which is
+  the stuffing the alignment exists to avoid rather than a second surface form.
+  Ten labels across six of the fourteen postings align, each adding a form the
+  page did not already carry.
+- **A title guess is a claim on the page, so it is allowed to be absent.** The
+  deterministic reader finds a title on 5 of 14 postings (an explicit
+  `Job Title:` label, a heading-shaped line *ending* in a role noun, or a
+  "seeking a … Engineer" sentence) and answers `None` on the rest. An earlier
+  version that merely *contained* a role noun offered "Internship Learning
+  Outcomes" as Infineon's job title. A model provider is expected to do better;
+  being silently wrong is what is not allowed.
+
+Deviations from `docs/plans/phase-3c.md`, all deliberate:
+
+- **`--llm` is not the v2 default.** With neither `--llm` nor `--no-llm` the
+  provider is `none` unless `ATS_LLM_PROVIDER` names one outright; `auto` alone
+  does not opt a plain `tailor` run into probing for a model and spending
+  minutes on extraction. `auto` is what `--llm` resolves to.
+- **`ProviderReranker` batches by requirement, not "≤ 8 requirements per
+  call".** `ats_match.Reranker` is called once per requirement with that
+  requirement's top-k pairs, so there is no cross-requirement batch to build;
+  pairs are grouped by query, which for the only caller is the same thing.
+- **Alias alignment reaches the skills line only.** The plan also names "the
+  certification keyword hints"; the template prints certifications as
+  `name -- issuer` and has no keyword hints to align.
+- **`RequirementSpec.weight` is not clamped to [0.5, 1.5]** — that band is
+  applied to *extracted* weights in `parse_profile`. The deterministic parser
+  weights a requirement that names nothing at `ATS_SOFT_REQ_WEIGHT` (0.25), and
+  clamping the field would have quadrupled the page budget spent on boilerplate.
+- **Two carry-overs from 3b landed here:** `embedding.encode_cached` is deleted
+  (nothing called it once the store existed), and `tracker.run_id` counts up
+  `-2`, `-3` … when an id is already in the store rather than overwriting the
+  record it collides with.
+
+One interaction worth naming, because it is a gap in a report rather than a bug
+in a run: a term that reaches the page *only* through the target statement
+("Robotics" on dConstruct) counts as `covered` by `ats-tailor check` and drops
+off the gap list, even though no index claim carries it. The sentence is honest
+— it says what the application is *for*, not what was done — but the gap report
+is quieter than it was. Phase 4 should either exclude the target statement's own
+words from the coverage tally or keep listing them as gaps.

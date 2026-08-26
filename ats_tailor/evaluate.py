@@ -111,7 +111,10 @@ def code_hash() -> str:
 
 
 def config_fingerprint(
-    index_dir: str | Path, engine: str = "v1"
+    index_dir: str | Path,
+    engine: str = "v1",
+    provider: str = "none",
+    prompt_version: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """``(hash, the values it was computed from)``.
 
@@ -124,6 +127,13 @@ def config_fingerprint(
         "ats_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("ATS_")},
         "embed_model": config.EMBED_MODEL,
         "engine": engine,
+        # Who read the postings, and with which prompt. Both belong in the
+        # identity of a sweep: the same code over the same index scores
+        # differently when a model wrote the requirements, and a prompt edit
+        # is a scoring change even though no Python moved.
+        "provider": provider,
+        "prompt_version": (config.PROMPT_VERSION if prompt_version is None
+                           else prompt_version),
         "index_hash": index_hash(index_dir),
         "code_hash": code_hash(),
     }
@@ -166,6 +176,8 @@ def evaluate_one(
     llm: bool = False,
     rerank: bool = False,
     engine: str = "v1",
+    provider: str = "none",
+    reextract: bool = False,
 ) -> dict[str, Any]:
     """Run the pipeline for one label, compile, check, and score it."""
     from .tailor import load_index_for_terms, run as run_pipeline
@@ -182,6 +194,10 @@ def evaluate_one(
         "--no-record",
     ]
     argv.append("--llm" if llm else "--no-llm")
+    if engine == "v2":
+        argv += ["--provider", provider]
+        if reextract:
+            argv.append("--reextract")
 
     log = io.StringIO()
     try:
@@ -203,6 +219,12 @@ def evaluate_one(
         record["requirements"] = len(result.requirements)
         record["budget"] = result.budget
         record["fit_iterations"] = result.iterations
+        record["provider"] = result.provider
+        record["provider_cached"] = result.provider_cached
+        record["jd_title"] = result.jd_title
+        record["gates"] = {
+            name: gate.get("verdict") for name, gate in (result.gates or {}).items()
+        }
 
     # ── compile + parse ──
     try:
@@ -270,6 +292,8 @@ def evaluate(
     rerank: bool = False,
     only: Sequence[str] | None = None,
     engine: str = "v1",
+    provider: str = "none",
+    reextract: bool = False,
 ) -> dict[str, Any]:
     index_dir = Path(index_dir).resolve()
     out_dir = Path(out_dir).resolve()
@@ -280,7 +304,7 @@ def evaluate(
     if not labels:
         raise ValueError(f"no label files to evaluate in {labels_dir}")
 
-    digest, values = config_fingerprint(index_dir, engine)
+    digest, values = config_fingerprint(index_dir, engine, provider)
     runs = []
     skipped: list[str] = []
     for i, (slug, label) in enumerate(labels.items(), start=1):
@@ -296,13 +320,15 @@ def evaluate(
         runs.append(evaluate_one(
             slug, label, jd_path, index_dir, profile,
             out_dir / "runs" / slug, llm=llm, rerank=rerank, engine=engine,
+            provider=provider, reextract=reextract,
         ))
 
     payload = {
         "config_hash": digest,
         "config": values,
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "options": {"llm": llm, "rerank": rerank, "engine": engine},
+        "options": {"llm": llm, "rerank": rerank, "engine": engine,
+                    "provider": provider, "prompt_version": config.PROMPT_VERSION},
         "runs": runs,
         "skipped": skipped,
         "means": means(runs),

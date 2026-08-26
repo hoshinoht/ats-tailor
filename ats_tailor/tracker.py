@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .store import FINAL_STATUSES, INITIAL_STATUS, Run, Store
 
@@ -25,12 +25,31 @@ from .store import FINAL_STATUSES, INITIAL_STATUS, Run, Store
 QUIET_DAYS = 10
 
 
-def run_id(company: str, role: str, when: datetime | None = None) -> str:
-    """``<company>-<role>-<YYYYMMDD-HHMMSS>`` — sortable, and unique per second."""
+def run_id(
+    company: str,
+    role: str,
+    when: datetime | None = None,
+    taken: Callable[[str], bool] | None = None,
+) -> str:
+    """``<company>-<role>-<YYYYMMDD-HHMMSS>`` — sortable, unique per second.
+
+    "Per second" is not "unique". Two runs of the same application inside one
+    second (a script, a retry, a `--reextract` loop) would otherwise collide,
+    and the second would overwrite the first's record — the one thing a record
+    exists not to do. ``taken`` answers whether an id is already in the store;
+    the suffix counts up from ``-2`` until it is not.
+    """
     from .tailor import _safe_slug
 
     stamp = (when or datetime.now()).strftime("%Y%m%d-%H%M%S")
-    return f"{_safe_slug(company, role)}-{stamp}"
+    base = f"{_safe_slug(company, role)}-{stamp}"
+    if taken is None:
+        return base
+    candidate, suffix = base, 1
+    while taken(candidate):
+        suffix += 1
+        candidate = f"{base}-{suffix}"
+    return candidate
 
 
 def file_sha256(path: str | Path) -> str | None:
@@ -66,7 +85,9 @@ def record(
     if check:
         payload["check"] = dict(check)
     return store.record_run(
-        run_id=identifier or run_id(result.company, result.role),
+        run_id=identifier or run_id(
+            result.company, result.role,
+            taken=lambda candidate: store.get_run(candidate) is not None),
         company=result.company,
         role=result.role,
         data=payload,
@@ -84,6 +105,18 @@ def _pct(value: Any) -> str:
     return "-" if value is None else f"{float(value) * 100:.0f}%"
 
 
+def gate_mark(run: Run) -> str:
+    """``⚠`` when the posting's gates carry a ``fail`` or a ``flag``."""
+    gates = (run.data or {}).get("gates") or {}
+    if not isinstance(gates, dict):
+        return " "
+    verdicts = {
+        str((gate or {}).get("verdict", "")).lower()
+        for gate in gates.values() if isinstance(gate, dict)
+    }
+    return "\u26a0" if verdicts & {"fail", "flag"} else " "
+
+
 def _coverage_cell(run: Run) -> str:
     coverage = run.coverage
     if not coverage:
@@ -97,6 +130,7 @@ def render_list(runs: Sequence[Run]) -> str:
         return "no runs recorded"
     rows = [
         (
+            gate_mark(run),
             run.id,
             run.created_at[:10],
             f"{run.company}/{run.role}",
@@ -106,7 +140,7 @@ def render_list(runs: Sequence[Run]) -> str:
         )
         for run in runs
     ]
-    headers = ("id", "created", "company/role", "status", "must/nice", "out_dir")
+    headers = ("!", "id", "created", "company/role", "status", "must/nice", "out_dir")
     widths = [
         max(len(headers[i]), max(len(row[i]) for row in rows))
         for i in range(len(headers))
@@ -141,6 +175,22 @@ def render_show(run: Run, notes: Sequence) -> str:
         lines.append(f"  config      {run.config_hash[:12]}")
     if run.pdf_sha256:
         lines.append(f"  pdf sha256  {run.pdf_sha256}")
+
+    gates = data.get("gates") or {}
+    blocking = [
+        (name, gate) for name, gate in gates.items()
+        if isinstance(gate, dict) and str(gate.get("verdict")).lower() in {"fail", "flag"}
+    ]
+    if data.get("jd_title"):
+        lines.append(f"  target      {data['jd_title']}")
+    if data.get("provider"):
+        lines.append(f"  read by     {data['provider']}")
+    if blocking:
+        lines.append("")
+        lines.append("gates")
+        for name, gate in blocking:
+            detail = gate.get("note") or gate.get("quote") or ""
+            lines.append(f"  {name:<11} {gate.get('verdict')}  {detail}")
 
     lines.append("")
     lines.append("selection")

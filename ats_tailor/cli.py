@@ -12,6 +12,7 @@ Subcommands:
 - ``sync``     — bring the runtime store in line with the index
 - ``override`` — edit a run's ``overrides.yaml``
 - ``runs``     — the application tracker
+- ``jd``       — read a posting into gates and requirements, and edit them
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import config
 from .index_io import SCHEMA_DIRNAME, write_index_schemas, write_schemas
 
 USAGE = """usage: ats-tailor <command> [options]
@@ -35,6 +37,7 @@ commands:
   sync      update the runtime store from the index (--embed to pre-embed)
   override  edit the per-run overrides.yaml next to a run's output
   runs      application tracker (runs list | show | status | note | quiet)
+  jd        inspect a posting's gates and requirements (jd show)
 """
 
 
@@ -295,6 +298,144 @@ def _cmd_runs(argv: list[str]) -> int:
     return 2
 
 
+def _cmd_jd(argv: list[str]) -> int:
+    """``jd show``: what the pipeline will read out of a posting, before it runs.
+
+    The point is the *order*: gates first, then the requirements and the terms
+    they carry. Everything printed here is what the next ``tailor`` of the same
+    posting will use — same provider, same cache key — so reviewing it is
+    reviewing the run, not a preview of one.
+    """
+    import json
+    import os
+    import subprocess
+    import tempfile
+
+    from .jd.extract import (
+        FALLBACK_PROVIDER, extract_requirements, save_edited, term_alias_map,
+    )
+    from .jd.hashing import jd_hash
+    from .jd.models import JDProfile
+    from .llm.provider import get_provider
+    from .loaders import load_profile
+    from .tailor import load_index_for_terms
+
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor jd",
+        description="Read a job description into gates and weighted requirements.")
+    sub = parser.add_subparsers(dest="action", required=True)
+    show = sub.add_parser("show", help="print a posting's profile")
+    show.add_argument("jd", help="job description text file")
+    show.add_argument("--index", default="index", help="index directory (default: index/)")
+    show.add_argument("--profile", default=None, help="profile.yaml")
+    show.add_argument("--data-dir", default=None, help="store directory")
+    show.add_argument("--provider", default=None, choices=list(config.PROVIDERS),
+                      help=f"who reads the posting (default: {config.LLM_PROVIDER})")
+    show.add_argument("--reextract", action="store_true",
+                      help="ignore any cached extraction and read it again")
+    show.add_argument("--company", default=None,
+                      help="company name, so the gap list matches the run's")
+    show.add_argument("--role", default=None,
+                      help="role name, so the gap list matches the run's")
+    show.add_argument("--json", action="store_true", help="print the profile as JSON")
+    show.add_argument("--edit", action="store_true",
+                      help="open the profile in $EDITOR and save it as the edited one")
+    args = parser.parse_args(argv)
+
+    jd_path = Path(args.jd)
+    if not jd_path.is_file():
+        print(f"error: no such job description: {jd_path}", file=sys.stderr)
+        return 1
+    jd_text = jd_path.read_text().strip()
+    if not jd_text:
+        print(f"error: {jd_path} is empty", file=sys.stderr)
+        return 1
+
+    index_dir = Path(args.index)
+    try:
+        index = load_index_for_terms(index_dir)
+        candidate = load_profile(_resolve_profile(args.profile, index_dir))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    provider = get_provider(args.provider, alias_map=term_alias_map(index))
+    store = _open_store(index_dir, args.data_dir)
+    try:
+        profile = extract_requirements(
+            jd_text, index, provider, store, jd_path=str(jd_path),
+            reextract=args.reextract,
+            # The company and role are `tailor`'s, not the posting's: they keep
+            # a company's own name out of the gap list. Given here, this prints
+            # exactly what that run will use; left out, one or two of the
+            # posting's proper nouns show up as requirement terms.
+            extra_known=[value for value in (args.company, args.role) if value],
+            languages=candidate.get("languages", []) or [],
+        )
+        if args.json:
+            print(json.dumps(profile.to_json(), indent=2))
+        else:
+            print(_render_jd_profile(profile, jd_path))
+        if not args.edit:
+            return 0
+
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
+        if not editor:
+            print("error: set $EDITOR to edit a profile", file=sys.stderr)
+            return 1
+        with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as handle:
+            handle.write(json.dumps(profile.to_json(), indent=2) + "\n")
+            temp = Path(handle.name)
+        try:
+            subprocess.run([*editor.split(), str(temp)], check=False)
+            edited = JDProfile.from_json(json.loads(temp.read_text()))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            temp.unlink(missing_ok=True)
+        if edited is None:
+            print("error: the edited file is not a valid profile; nothing saved",
+                  file=sys.stderr)
+            return 1
+        save_edited(store, jd_text,
+                    edited.model_copy(update={
+                        "provider": profile.provider or FALLBACK_PROVIDER}),
+                    jd_path=str(jd_path))
+        print(f"saved the edited profile for {jd_hash(jd_text)[:12]} "
+              f"(provider {profile.provider}); it now outranks any extraction")
+        return 0
+    finally:
+        store.close()
+
+
+def _render_jd_profile(profile, jd_path) -> str:
+    """Gates first, then the requirements, then what the index cannot cover."""
+    lines = [
+        f"{jd_path}",
+        f"  read by     {profile.provider}"
+        + (f" (prompt {profile.prompt_version})" if profile.prompt_version else "")
+        + ("  [cached]" if profile.cached else ""),
+        f"  title       {profile.title or '-'}",
+        f"  archetype   {profile.archetype or '-'}",
+        "",
+        "gates",
+    ]
+    lines += [f"  {line}" for line in profile.gates.render().splitlines()]
+    lines += ["", f"requirements ({profile.summary_line()})", ""]
+    header = f"  {'id':<14} {'kind':<14} {'w':>4}  {'terms':<34} text"
+    lines.append(header)
+    lines.append("  " + "-" * (len(header) - 2))
+    for spec in profile.requirements:
+        terms = ", ".join(spec.terms)
+        text = spec.text if len(spec.text) <= 70 else spec.text[:69] + "…"
+        lines.append(
+            f"  {spec.id:<14} {spec.kind:<14} {spec.weight:>4.2f}  "
+            f"{(terms[:33] + '…') if len(terms) > 34 else terms:<34} {text}"
+        )
+    return "\n".join(lines)
+
+
 def _resolve_profile(explicit, index_dir):
     """``--profile`` if given, else ``profile.yaml`` beside the index directory."""
     return Path(explicit) if explicit else Path(index_dir).resolve().parent / "profile.yaml"
@@ -535,8 +676,16 @@ def _cmd_eval(argv: list[str]) -> int:
     parser.add_argument("--llm", action="store_true", help="enable LLM keyword expansion")
     parser.add_argument("--rerank", action="store_true", help="enable cross-encoder reranking")
     parser.add_argument("--only", nargs="+", default=None, help="evaluate only these slugs")
-    parser.add_argument("--engine", choices=["v1", "v2"], default="v1",
-                        help="selection engine to evaluate (default: v1)")
+    parser.add_argument("--engine", choices=["v1", "v2"], default=config.ENGINE,
+                        help=f"selection engine to evaluate (env: ATS_ENGINE, "
+                             f"default: {config.ENGINE})")
+    parser.add_argument("--provider", default="none", choices=list(config.PROVIDERS),
+                        help="who reads the postings in the v2 engine (default: none). "
+                             "Recorded in the config fingerprint; profiles are cached "
+                             "per (jd, provider, prompt version), so a model sweep is "
+                             "reproducible once it has run")
+    parser.add_argument("--reextract", action="store_true",
+                        help="ignore cached extractions and read every posting again")
     parser.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"), default=None,
                         help="print the per-metric delta between two eval results")
     args = parser.parse_args(argv)
@@ -549,7 +698,8 @@ def _cmd_eval(argv: list[str]) -> int:
         payload = evaluate(
             args.index, args.labels_dir, args.jd_dir, args.out,
             profile_path=args.profile, llm=args.llm, rerank=args.rerank,
-            only=args.only, engine=args.engine,
+            only=args.only, engine=args.engine, provider=args.provider,
+            reextract=args.reextract,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -572,6 +722,7 @@ COMMANDS = {
     "check": _cmd_check,
     "labels": _cmd_labels,
     "eval": _cmd_eval,
+    "jd": _cmd_jd,
 }
 
 

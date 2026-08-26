@@ -105,6 +105,34 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX IF NOT EXISTS run_notes_run ON run_notes(run_id);
     """,
+    # ── v2 (Phase 3c): one posting has as many profiles as it has readers ──
+    # A JD read by the deterministic parser, by ollama, and by ollama again
+    # under a new prompt are three different answers about the same text, and
+    # `extract_requirements` caches on exactly that triple. `prompt_version` is
+    # NOT NULL with an empty default because SQLite treats NULLs in a primary
+    # key as distinct, which would let the same row be inserted forever.
+    """
+    CREATE TABLE IF NOT EXISTS jd_profiles_v2 (
+        jd_hash        TEXT NOT NULL,
+        provider       TEXT NOT NULL DEFAULT 'fallback',
+        prompt_version TEXT NOT NULL DEFAULT '',
+        source_path    TEXT,
+        text           TEXT NOT NULL,
+        extracted_json TEXT,
+        edited_json    TEXT,
+        created_at     TEXT NOT NULL,
+        PRIMARY KEY (jd_hash, provider, prompt_version)
+    );
+    INSERT OR IGNORE INTO jd_profiles_v2
+        (jd_hash, provider, prompt_version, source_path, text,
+         extracted_json, edited_json, created_at)
+    SELECT jd_hash, COALESCE(provider, 'fallback'), COALESCE(prompt_version, ''),
+           source_path, text, extracted_json, edited_json, created_at
+    FROM jd_profiles;
+    DROP TABLE jd_profiles;
+    ALTER TABLE jd_profiles_v2 RENAME TO jd_profiles;
+    CREATE INDEX IF NOT EXISTS jd_profiles_hash ON jd_profiles(jd_hash);
+    """,
 ]
 
 
@@ -144,7 +172,14 @@ class Entity:
 
 
 @dataclass(frozen=True)
-class JDProfile:
+class JDProfileRow:
+    """One row of ``jd_profiles`` — a posting plus one reader's answer.
+
+    Not :class:`ats_tailor.jd.models.JDProfile`, which is the answer itself:
+    ``extracted``/``edited`` here are that profile's JSON, and one posting has
+    as many rows as it has been read by.
+    """
+
     jd_hash: str
     source_path: str | None
     text: str
@@ -366,18 +401,43 @@ class Store:
         return int(row["n"])
 
     # ── job descriptions ──
-    def get_jd_profile(self, jd_hash: str) -> JDProfile | None:
+    def get_jd_profile(
+        self,
+        jd_hash: str,
+        provider: str | None = None,
+        prompt_version: str | None = None,
+    ) -> JDProfileRow | None:
+        """One posting's profile.
+
+        With ``provider`` (and optionally ``prompt_version``) this is the exact
+        cache lookup ``jd.extract`` does. Without it, the newest row for the
+        posting is returned — which is what a caller asking "has this JD been
+        seen at all?" means, and what every pre-3c call site meant.
+        """
+        clauses, params = ["jd_hash = ?"], [jd_hash]
+        if provider is not None:
+            clauses.append("provider = ?")
+            params.append(provider)
+        if prompt_version is not None:
+            clauses.append("prompt_version = ?")
+            params.append(prompt_version)
         row = self.conn.execute(
-            "SELECT * FROM jd_profiles WHERE jd_hash = ?", (jd_hash,)
+            f"SELECT * FROM jd_profiles WHERE {' AND '.join(clauses)} "
+            f"ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params,
         ).fetchone()
-        if row is None:
-            return None
-        return JDProfile(
-            jd_hash=row["jd_hash"], source_path=row["source_path"], text=row["text"],
-            provider=row["provider"], prompt_version=row["prompt_version"],
-            extracted=_loads(row["extracted_json"]), edited=_loads(row["edited_json"]),
-            created_at=row["created_at"],
-        )
+        return None if row is None else _jd_profile(row)
+
+    def jd_profiles(self, jd_hash: str | None = None) -> list[JDProfileRow]:
+        """Every reading of a posting (or of every posting), newest first."""
+        where, params = ("", [])
+        if jd_hash is not None:
+            where, params = (" WHERE jd_hash = ?", [jd_hash])
+        rows = self.conn.execute(
+            f"SELECT * FROM jd_profiles{where} ORDER BY created_at DESC, rowid DESC",
+            params,
+        ).fetchall()
+        return [_jd_profile(row) for row in rows]
 
     def put_jd_profile(
         self,
@@ -389,23 +449,31 @@ class Store:
         extracted: Any = None,
         edited: Any = None,
     ) -> None:
-        """Record the posting and what the extractor made of it.
+        """Record the posting and what one reader made of it.
 
-        An existing ``edited_json`` is kept when the caller passes none: the
-        human edit outlives any number of re-extractions.
+        Keyed on ``(jd_hash, provider, prompt_version)``. An existing
+        ``edited_json`` is kept when the caller passes none: the human edit
+        outlives any number of re-extractions. Passing ``extracted=None``
+        likewise keeps what is stored, so writing an edit never erases the
+        extraction it was made from.
         """
-        existing = self.get_jd_profile(jd_hash)
+        prompt_version = "" if prompt_version is None else str(prompt_version)
+        existing = self.get_jd_profile(jd_hash, provider, prompt_version)
         if edited is None and existing is not None:
             edited = existing.edited
+        if extracted is None and existing is not None:
+            extracted = existing.extracted
         self.conn.execute(
-            "INSERT INTO jd_profiles (jd_hash, source_path, text, provider, "
-            "prompt_version, extracted_json, edited_json, created_at) "
+            "INSERT INTO jd_profiles (jd_hash, provider, prompt_version, "
+            "source_path, text, extracted_json, edited_json, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(jd_hash) DO UPDATE SET source_path=excluded.source_path, "
-            "text=excluded.text, provider=excluded.provider, "
-            "prompt_version=excluded.prompt_version, "
+            "ON CONFLICT(jd_hash, provider, prompt_version) DO UPDATE SET "
+            # A caller that does not know where the posting came from must not
+            # erase the path a caller that did know already recorded.
+            "source_path=COALESCE(excluded.source_path, jd_profiles.source_path), "
+            "text=excluded.text, "
             "extracted_json=excluded.extracted_json, edited_json=excluded.edited_json",
-            (jd_hash, source_path, text, provider, prompt_version,
+            (jd_hash, provider, prompt_version, source_path, text,
              _dumps(extracted) if extracted is not None else None,
              _dumps(edited) if edited is not None else None,
              existing.created_at if existing else now()),
@@ -535,6 +603,15 @@ def _vector(row: sqlite3.Row) -> np.ndarray:
         )
     norm = float(np.linalg.norm(vec))
     return vec / norm if norm > 0 else vec
+
+
+def _jd_profile(row: sqlite3.Row) -> JDProfileRow:
+    return JDProfileRow(
+        jd_hash=row["jd_hash"], source_path=row["source_path"], text=row["text"],
+        provider=row["provider"], prompt_version=row["prompt_version"],
+        extracted=_loads(row["extracted_json"]), edited=_loads(row["edited_json"]),
+        created_at=row["created_at"],
+    )
 
 
 def _run(row: sqlite3.Row) -> Run:

@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -36,8 +35,9 @@ from .adapt import (
 from .atscheck import CompileError, compile_pdf, gap_terms, index_term_forms, output_filename
 from .embedding import SentenceTransformerEmbedder, encode_store
 from .index_io import to_legacy
-from .jd.hashing import jd_hash
-from .jd.requirements import requirements_from_jd
+from .jd.extract import extract_requirements, save_edited
+from .jd.gates import gate_dict
+from .llm.provider import NoneProvider
 from .models import Index
 from .overrides import (
     Overrides,
@@ -46,6 +46,8 @@ from .overrides import (
     resolve as resolve_overrides,
     text_map,
 )
+from .render.surface import align_labels, jd_forms
+from .rerank import load_reranker
 from .rendering import render_prompt, render_resume
 from .reporting import generate_requirement_visualization, generate_v2_report
 from .results import RunResult
@@ -79,6 +81,8 @@ class V2Options:
     model: str = config.EMBED_MODEL
     index_dir: Path | None = None
     rerank: bool = False
+    #: ``ATS_RERANK`` mode when ``rerank`` is on: ``cross`` or ``llm``.
+    rerank_mode: str | None = None
     compile_page_check: bool = True
     max_page_lines: int = config.MAX_PAGE_LINES
     max_iterations: int = MAX_ITERATIONS
@@ -93,6 +97,17 @@ class V2Options:
     store: Store | None = None
     #: Where the posting came from, recorded with the JD profile.
     jd_path: str | None = None
+    #: Who reads the posting. ``None`` means nobody: the deterministic parser
+    #: runs and the run needs no model, which is what a library caller and
+    #: every test get unless they ask otherwise. The CLI is where a configured
+    #: provider is resolved, because that is where the user asked for one.
+    provider: Any = None
+    #: Ignore any cached extraction for this posting and read it again.
+    reextract: bool = False
+    #: Append the posting's job title to the Summary (``ATS_TARGET_TITLE``).
+    target_title: bool = config.TARGET_TITLE
+    #: Languages the candidate declares, for the language gate.
+    languages: Sequence[str] = ()
 
 
 def tailor_v2(
@@ -123,24 +138,39 @@ def tailor_v2(
 
 def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
                overrides, store, say) -> RunResult:
-    # ── 1. posting → requirements, index → claims ──
+    # ── 1. posting → profile (gates first), index → claims ──
+    provider = options.provider or NoneProvider()
     term_forms = index_term_forms(index)
     gaps = gap_terms(jd_text, index, extra_known=[company, role])
-    extracted = requirements_from_jd(jd_text, term_forms, gaps)
+    jd_profile = extract_requirements(
+        jd_text, index, provider, store,
+        jd_path=options.jd_path, reextract=options.reextract,
+        term_forms=term_forms, gaps=gaps, languages=options.languages,
+        say=say,
+    )
+    # Gates come before anything is scored: a citizenship clause or a closed
+    # posting decides whether the rest of this run is worth reading, and it is
+    # the user's decision, so nothing here aborts.
+    say("Gates")
+    for line in jd_profile.gates.render().splitlines():
+        say(f"  {line}")
+    if jd_profile.title:
+        say(f"  target title  {jd_profile.title}")
+    say(f"  {jd_profile.summary_line()}")
+
+    extracted = jd_profile.to_requirements()
     requirements = apply_requirements(extracted, overrides.requirements)
     if not overrides.requirements.empty():
         say(f"  Overrides: requirements {len(extracted)} → {len(requirements)} "
             f"({len(overrides.requirements.reweight)} reweighted)")
-    # ``extracted`` is what the parser said; ``edited`` is what this run used,
-    # recorded separately so 3c's LLM extractor can be judged against the
-    # deterministic one without a human edit being mistaken for either.
-    store.put_jd_profile(
-        jd_hash(jd_text), jd_text, provider="fallback",
-        source_path=options.jd_path,
-        extracted=[_requirement_dict(r) for r in extracted],
-        edited=([_requirement_dict(r) for r in requirements]
-                if not overrides.requirements.empty() else None),
-    )
+        # An edited requirement set is the user's reading of the posting, so it
+        # is stored where it outranks any future extraction of the same text.
+        save_edited(
+            store, jd_text,
+            jd_profile.model_copy(update={
+                "requirements": [_requirement_spec(r) for r in requirements]}),
+            jd_path=options.jd_path,
+        )
 
     text_edits = text_map(overrides)
     for warning in metric_warnings(index, text_edits):
@@ -171,9 +201,10 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
     requirement_vectors = encode_store(
         embedder, [r.text for r in requirements], store, "req", embedder.query_prefix
     )
-    reranker = _load_reranker() if options.rerank else None
+    reranker = _reranker(options, provider)
     matrix, claim_sim = build_matrix(
         requirements, claims, embedder, alias_map(index), reranker=reranker,
+        top_k=config.RERANK_TOP_K,
         claim_vectors=claim_vectors, requirement_vectors=requirement_vectors,
     )
 
@@ -182,7 +213,12 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
     education = legacy_exp["education"][:2]
     certs = legacy_certs["certifications"]
     selected_certs = select_certifications(certs, _cert_scores(embedder, jd_text, certs, store))
+    summary_data = _summary_variant(summary_data, index, jd_profile.archetype, say)
     summary_data = _apply_summary(summary_data, overrides.summary)
+    # The posting's own spelling, for the skills line only: bullets are the
+    # user's sentences and are never rewritten here (Phase 5 owns variants).
+    skill_labels = align_labels(index, jd_forms(jd_text, index))
+    target_title = jd_profile.title if options.target_title else None
 
     fixed_lines = estimate_line_count([], [], summary_data, selected_certs)
     # The fixed estimate already reserves a flat block for the skills section;
@@ -214,11 +250,13 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
             options.params, claim_sim=claim_sim,
         )
         exp_ctx, proj_ctx, skill_lines = render_context(
-            selection, index, claims, text_overrides=text_edits)
+            selection, index, claims, text_overrides=text_edits,
+            skill_labels=skill_labels)
         resume_tex = render_resume(
             company=company, role=role, profile=profile, education=education,
             experience=exp_ctx, projects=proj_ctx, skill_lines=skill_lines,
             certifications=selected_certs, summary=summary_data,
+            target_title=target_title,
         )
         tex_path = out_dir / "resume.tex"
         tex_path.write_text(resume_tex)
@@ -263,6 +301,7 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
         company, role, requirements, claims, selection, matrix, skill_lines,
         certs=certs, selected_certs=selected_certs, gaps=gaps,
         budget=chosen["budget"], pages=chosen["pages"], attempts=len(attempts),
+        profile=jd_profile,
     ))
     generate_requirement_visualization(
         out_dir, company, role, requirements, selection.coverage, GAP_THRESHOLD
@@ -292,6 +331,11 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
         pages=chosen["pages"],
         budget=chosen["budget"],
         iterations=len(attempts),
+        gates=gate_dict(jd_profile.gates),
+        jd_title=jd_profile.title,
+        archetype=jd_profile.archetype,
+        provider=jd_profile.provider,
+        provider_cached=jd_profile.cached,
     )
     (out_dir / "selection.json").write_text(json.dumps(result.to_dict(), indent=2) + "\n")
     say(f"\nDone! Output in: {out_dir}")
@@ -299,26 +343,36 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-@lru_cache(maxsize=1)
-def _load_reranker():
-    """A cross-encoder wrapped to satisfy ``ats_match.Reranker`` (opt-in).
+def _reranker(options: V2Options, provider):
+    """The reranker this run asked for (``ats_tailor.rerank``), or ``None``."""
+    if not options.rerank:
+        return None
+    mode = options.rerank_mode or (
+        config.RERANK_MODE if config.RERANK_MODE != "none" else "cross")
+    return load_reranker(mode, provider)
 
-    Cached per process for the same reason the embedder is: ``eval`` runs the
-    pipeline a dozen times and re-loading the weights each time would dominate
-    any measurement of what the reranker actually costs.
-    """
-    from sentence_transformers import CrossEncoder
 
-    class _CrossEncoderReranker:
-        def __init__(self):
-            self.model = CrossEncoder(
-                "cross-encoder/ms-marco-MiniLM-L-6-v2", token=config.HF_TOKEN
-            )
+def _summary_variant(summary_data: dict | None, index: Index, archetype, say):
+    """``summaries.variants[archetype]`` when the index has one for it."""
+    variants = getattr(index.summaries, "variants", {}) or {}
+    if not summary_data or not archetype:
+        return summary_data
+    variant = variants.get(archetype)
+    if not variant or not str(variant).strip():
+        return summary_data
+    say(f"  Summary: variant for {archetype!r}")
+    return {**summary_data, "summary": str(variant).strip()}
 
-        def score(self, pairs):
-            return [float(s) for s in self.model.predict(list(pairs))]
 
-    return _CrossEncoderReranker()
+def _requirement_spec(requirement):
+    """One ``ats_match.Requirement`` back in the profile's own shape."""
+    from .jd.models import RequirementSpec
+
+    return RequirementSpec(
+        id=requirement.id, text=requirement.text, kind=requirement.kind,
+        weight=requirement.weight, terms=list(requirement.terms),
+        category=requirement.category,
+    )
 
 
 def _requirement_dict(requirement) -> dict[str, Any]:

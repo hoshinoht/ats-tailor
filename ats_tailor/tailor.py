@@ -128,6 +128,12 @@ def run(argv=None):
     parser.add_argument("--llm-backend", choices=["auto", "mlx", "lmstudio", "ollama"],
                         default=config.LLM_BACKEND,
                         help="LLM backend (env: ATS_LLM_BACKEND, default: auto)")
+    parser.add_argument("--provider", choices=list(config.PROVIDERS), default=None,
+                        help="who reads the posting in the v2 engine "
+                             f"(env: ATS_LLM_PROVIDER, default: {config.LLM_PROVIDER}); "
+                             "ignored by v1")
+    parser.add_argument("--reextract", action="store_true",
+                        help="v2: ignore any cached extraction and read the posting again")
     parser.add_argument("--check", action="store_true",
                         help="compile the PDF and run the ATS parse/keyword check")
     parser.add_argument("--engine", choices=["v1", "v2"], default=config.ENGINE,
@@ -142,6 +148,11 @@ def run(argv=None):
     # Wire CLI --llm-backend to config so llm.py picks it up
     config.LLM_BACKEND = args.llm_backend
 
+    # Whether the *flag* was typed, as opposed to ATS_LLM_EXPAND being set.
+    # v1 does not care (both mean "expand"); v2 does, because there the flag
+    # asks a provider to read the posting and the env var is about v1 keywords.
+    args.llm_explicit = any(
+        a == "--llm" or a.startswith("--llm=") for a in raw_args)
     if args.no_llm:
         args.llm = None
     elif not hasattr(args, "llm"):
@@ -187,11 +198,11 @@ def run(argv=None):
     profile = load_profile(profile_path)
 
     if args.engine == "v2":
-        if args.llm:
-            # v2 reads the posting through its own requirement parser; putting
-            # invented keywords in front of that would tier and weight text the
-            # posting never contained. LLM extraction arrives in Phase 3c.
-            print("  Note: --llm is ignored by the v2 engine (see docs/plans/phase-3a.md)")
+        # v2 gives --llm a different meaning from v1's: not "invent keywords the
+        # posting never used" (which would tier and weight text nobody wrote),
+        # but "let the configured provider read the posting into requirements
+        # and gates". --no-llm forces `none`, and so does the absence of both
+        # flags unless a provider is named in the configuration.
         return _v2_run_and_record(args, jd_text, profile, index_dir, out_dir)
 
     # ── Load index ──
@@ -580,9 +591,37 @@ def run(argv=None):
     return result
 
 
+def provider_choice(args):
+    """``(provider name, model override)`` for a v2 run.
+
+    ``--provider`` settles it. Otherwise ``--no-llm`` means ``none``, ``--llm``
+    means the configured provider, and *neither* flag means ``none`` unless the
+    configuration names a provider outright: ``auto`` is an invitation to probe
+    for a model, and an invitation is not an instruction, so a plain
+    ``ats-tailor tailor`` stays as fast and as reproducible as it was.
+    """
+    if getattr(args, "provider", None):
+        return args.provider, None
+    if getattr(args, "no_llm", False):
+        return "none", None
+    if not getattr(args, "llm_explicit", False):
+        return (config.LLM_PROVIDER if config.LLM_PROVIDER != "auto" else "none"), None
+    requested = getattr(args, "llm", None)
+    if requested:
+        # `--llm ollama` names a provider; `--llm gpt-oss:20b` names a model to
+        # give to the configured one.
+        if str(requested) in set(config.PROVIDERS):
+            return str(requested), None
+        return (config.LLM_PROVIDER if config.LLM_PROVIDER != "none" else "auto",
+                str(requested))
+    return (config.LLM_PROVIDER if config.LLM_PROVIDER != "auto" else "none"), None
+
+
 def _run_v2(args, jd_text, profile, index_dir, out_dir, overrides=None, store=None):
     """The v2 engine, which needs the typed index rather than the v1 dicts."""
     from .index_io import detect_layout, load_index_v2
+    from .jd.extract import term_alias_map
+    from .llm.provider import get_provider
     from .pipeline import V2Options, tailor_v2
 
     if detect_layout(index_dir) != "v2":
@@ -591,11 +630,22 @@ def _run_v2(args, jd_text, profile, index_dir, out_dir, overrides=None, store=No
         sys.exit(1)
     print(f"Loading v2 index from {index_dir}...")
     index = load_index_v2(index_dir)
+
+    name, model_override = provider_choice(args)
+    provider = get_provider(name, alias_map=term_alias_map(index))
+    if model_override and hasattr(provider, "model"):
+        provider.model = model_override
+    if provider.name != "none":
+        print(f"Provider: {provider.name}"
+              + (f" ({provider.model})" if getattr(provider, "model", None) else ""))
+
     return tailor_v2(
         jd_text, index, profile, args.company, args.role, out_dir,
         V2Options(
             model=args.model, index_dir=index_dir, rerank=args.rerank,
             overrides=overrides, store=store, jd_path=args.jd,
+            provider=provider, reextract=getattr(args, "reextract", False),
+            languages=profile.get("languages", []) or [],
         ),
     )
 

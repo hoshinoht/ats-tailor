@@ -235,13 +235,16 @@ def _truncate(text, width=70):
 def generate_v2_report(
     company, role, requirements, claims, selection, matrix, skill_lines,
     certs=None, selected_certs=None, gaps=None, budget=None, pages=None,
-    attempts=1, gap_threshold=0.3,
+    attempts=1, gap_threshold=0.3, profile=None,
 ):
     """The v2 match report: what was asked for, what was shown, and why.
 
     Unlike the v1 report — a ranking of whole items — this is a coverage
     ledger: every requirement the posting was parsed into, the claim that
-    covers it best, and the greedy trace that got there.
+    covers it best, and the greedy trace that got there. ``profile`` is the
+    :class:`ats_tailor.jd.models.JDProfile` the posting was read into; its
+    gates go at the top, above any score, for the same reason the run prints
+    them first.
     """
     by_id = {c.id: c for c in claims}
     index_of = {c.id: i for i, c in enumerate(claims)}
@@ -262,6 +265,10 @@ def generate_v2_report(
         f"- page-fit attempts: **{attempts}**"
         + (f", final page count: **{pages}**" if pages else ""),
         "",
+    ]
+    if profile is not None:
+        lines += _gate_section(profile)
+    lines += [
         "## Requirements",
         "",
         "| id | kind | w | coverage | covered | best claim | score | requirement |",
@@ -328,6 +335,35 @@ def generate_v2_report(
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _gate_section(profile) -> list[str]:
+    """Gates, quoted, before anything the selection decided."""
+    lines = [
+        f"- read by: **{profile.provider}**"
+        + (f" (prompt {profile.prompt_version})" if profile.prompt_version else "")
+        + (" — cached" if profile.cached else ""),
+    ]
+    if profile.title:
+        lines.append(f"- target title: **{profile.title}**")
+    if profile.archetype:
+        lines.append(f"- archetype: **{profile.archetype}**")
+    lines += ["", "## Gates", "",
+              "Hard filters, quoted from the posting. Nothing here changes a "
+              "score — it decides whether the application is possible at all.",
+              "", "| gate | verdict | detail | posting says |", "|---|---|---|---|"]
+    for name, gate in profile.gates.items():
+        detail = gate.note or ""
+        if gate.date:
+            detail = f"{gate.date} — {detail}" if detail else gate.date
+        quote = _md_cell(gate.quote or "—")
+        lines.append(f"| {name} | {gate.verdict} | {_md_cell(detail or '—')} | {quote} |")
+    blocking = profile.gates.blocking()
+    if blocking:
+        lines += ["", "**Check before applying:** " + ", ".join(
+            f"{name} ({gate.verdict})" for name, gate in blocking)]
+    lines.append("")
+    return lines
 
 
 def _best_claim(matrix, index_of, chosen, requirement, requirements):

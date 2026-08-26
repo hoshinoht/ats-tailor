@@ -308,6 +308,7 @@ def render_context(
     index: Index,
     claims: Sequence[Claim] | None = None,
     text_overrides: Mapping[str, str] | None = None,
+    skill_labels: Mapping[str, str] | None = None,
 ):
     """``(experience, projects, skill_lines)`` in the shapes the template wants.
 
@@ -318,6 +319,10 @@ def render_context(
 
     ``text_overrides`` is the same map ``claims_from_index`` was built with, so
     the page prints the wording the solver actually chose on.
+
+    ``skill_labels`` (skill id → label) is how the posting's own spelling
+    reaches the page — see :mod:`ats_tailor.render.surface`. Absent, every
+    skill prints under its index name, which is what v1 did.
     """
     legacy_skills, legacy_projects, legacy_exp, _certs, _summary = to_legacy(index)
     text_overrides = dict(text_overrides or {})
@@ -370,7 +375,8 @@ def render_context(
     role_ctx.sort(key=lambda c: parse_start_date(c["period"]), reverse=True)
     project_ctx.sort(key=lambda c: parse_start_date(c["period"]), reverse=True)
 
-    skill_lines = _skill_lines(selection, index, by_id, chosen, legacy_skills)
+    skill_lines = _skill_lines(selection, index, by_id, chosen, legacy_skills,
+                               skill_labels)
     return role_ctx, project_ctx, skill_lines
 
 
@@ -381,15 +387,27 @@ def _group_of(claim_id: str, index: Index) -> str | None:
     return None
 
 
-def _skill_lines(selection, index: Index, by_id, chosen, legacy_skills) -> list[dict]:
-    """One rendered line per selected category, best-covering category first."""
+def _skill_lines(
+    selection, index: Index, by_id, chosen, legacy_skills,
+    skill_labels: Mapping[str, str] | None = None,
+) -> list[dict]:
+    """One rendered line per selected category, best-covering category first.
+
+    Labels are deduped across the whole section, not just within a line: two
+    categories can align onto the same posting word, and the same term printed
+    twice is the stuffing ``ats-tailor check`` warns about.
+    """
+    from .render.surface import dedupe_labels
+
+    labels = dict(skill_labels or {})
     gains = {step.claim_id: float(step.gain) for step in selection.trace}
     per_category: dict[str, list[tuple[float, str]]] = {}
     for claim_id in selection.claim_ids:
         claim = by_id.get(claim_id)
         if claim is None or claim.section != "skill":
             continue
-        name = str(claim.attrs.get("name") or claim.text)
+        skill_id = str(claim.attrs.get("skill_id") or "")
+        name = labels.get(skill_id) or str(claim.attrs.get("name") or claim.text)
         per_category.setdefault(claim.group, []).append((gains.get(claim_id, 0.0), name))
 
     ordered = sorted(
@@ -397,13 +415,15 @@ def _skill_lines(selection, index: Index, by_id, chosen, legacy_skills) -> list[
         key=lambda item: (-sum(gain for gain, _ in item[1]), item[0]),
     )
     lines = []
+    printed: set[str] = set()
     for category, entries in ordered:
         names = [name for _gain, name in sorted(entries, key=lambda e: (-e[0], e[1]))]
+        names = dedupe_labels(names, printed)[:MAX_SKILLS_PER_LINE]
         if not names:
             continue
         lines.append({
             "category": CATEGORY_LABELS.get(category, category),
-            "skills": ", ".join(names[:MAX_SKILLS_PER_LINE]),
+            "skills": ", ".join(names),
         })
     return lines
 
