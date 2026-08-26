@@ -30,7 +30,7 @@ commands:
   tailor    generate a tailored resume (see `ats-tailor tailor --help`)
   validate  validate an index directory (v1 or v2 layout)
   migrate   convert a v1 index directory to the v2 layout
-  schema    write JSON Schema files for the v2 index
+  schema    write JSON Schema files for the v2 index (--index DIR | --out DIR)
   check     ATS parse + keyword check on a rendered resume
   labels    manage per-JD ground truth (labels init | list | from-run)
   eval      score the pipeline against the labels
@@ -112,18 +112,22 @@ def _cmd_migrate(argv: list[str]) -> int:
 
 
 def _cmd_schema(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="ats-tailor schema")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--out", default=None,
-                       help="output directory (default: schema/)")
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor schema",
+        description="Write JSON Schema files for the v2 index. "
+                    "Give either --index (the usual case) or --out.",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--index", default=None,
                        help=f"index directory; writes into <dir>/{SCHEMA_DIRNAME}/")
+    group.add_argument("--out", default=None,
+                       help="write the schema files straight into this directory")
     args = parser.parse_args(argv)
 
     if args.index:
         written = write_index_schemas(args.index)
     else:
-        written = write_schemas(Path(args.out or "schema"))
+        written = write_schemas(Path(args.out))
     for path in written:
         print(f"wrote {path}")
     return 0

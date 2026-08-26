@@ -668,17 +668,6 @@ def surface_form_set(terms: dict[str, list[str]]) -> set[str]:
     return {form for forms in terms.values() for form in forms} | set(terms)
 
 
-def load_terms(index_dir: str | Path) -> dict[str, list[str]]:
-    """Term → surface forms for an index directory of either layout."""
-    from .index_io import detect_layout, load_index_v2
-    from .loaders import load_index
-
-    index_dir = Path(index_dir)
-    if detect_layout(index_dir) == "v2":
-        return index_term_forms(load_index_v2(index_dir))
-    return index_term_forms(load_index(index_dir))
-
-
 #: A heading names its section early. Allowing three leading words covers
 #: "Job Requirements:" and "What we are looking for" while keeping a mid-
 #: sentence "(PostgreSQL preferred)" from re-tiering the section it sits in.

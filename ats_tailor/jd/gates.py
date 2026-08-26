@@ -15,8 +15,8 @@ is downgraded to ``flag`` with the quote it missed.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
-from typing import Iterable, Sequence
+from datetime import date
+from typing import Iterable
 
 from .models import GATE_NAMES, Gate, Gates
 
@@ -264,14 +264,3 @@ def gate_dict(gates: Gates) -> dict[str, dict]:
     """The gates as plain JSON, for the run record and the report."""
     return {name: gate.model_dump(mode="json", exclude_none=True)
             for name, gate in gates.items()}
-
-
-def parse_iso(value: str) -> date | None:
-    try:
-        return datetime.fromisoformat(str(value)).date()
-    except (TypeError, ValueError):
-        return None
-
-
-def blocking_names(gates: Gates) -> Sequence[str]:
-    return [name for name, _gate in gates.blocking()]

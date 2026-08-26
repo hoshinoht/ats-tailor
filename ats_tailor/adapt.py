@@ -426,9 +426,3 @@ def _skill_lines(
             "skills": ", ".join(names),
         })
     return lines
-
-
-def certification_scores(index: Index) -> list[dict]:
-    """The legacy certification dicts, for v1's ``select_certifications``."""
-    _skills, _projects, _exp, certs, _summary = to_legacy(index)
-    return certs["certifications"]

@@ -9,8 +9,8 @@ uv sync --extra dev     # creates .venv from pyproject.toml + uv.lock
 uv run ats-tailor --help
 ```
 
-`pip install -r requirements.txt` also works — `requirements.txt` is a pointer to
-`-e .`, so it installs the same dependency set from `pyproject.toml`.
+`uv` is canonical; `pip install -e .` installs the same dependency set from
+`pyproject.toml` if you would rather use a virtualenv of your own.
 
 Optional extras: `--extra mlx` (local MLX inference), `--extra dev` (pytest).
 
@@ -28,7 +28,7 @@ ats-tailor <command> [options]
 | `tailor …` | Generate a tailored resume. Arguments are identical to `python -m ats_tailor.tailor` (see below). |
 | `validate [index_dir]` | Load an index in either layout; print schema errors (exit 1) and non-fatal warnings (exit 0). |
 | `migrate <src> <dst> [--force]` | Convert a v1 index directory into the v2 layout and print a migration report. |
-| `schema [--out DIR \| --index DIR]` | Write JSON Schema files for the v2 index. `--out` (default `schema/`) writes a standalone copy; `--index DIR` writes them into `DIR/.schema/`, where the files' `$schema` hints point. |
+| `schema (--index DIR \| --out DIR)` | Write JSON Schema files for the v2 index. `--index DIR` writes them into `DIR/.schema/`, where the files' `$schema` hints point; `--out DIR` writes a standalone copy somewhere else. One of the two is required. |
 | `check <output_dir> …` | Compile the rendered resume and check that an ATS can read it: parse checks plus keyword coverage. Exit 1 if any parse check fails. |
 | `labels init <jd> --company --role` | Scaffold the per-JD ground truth file `eval` scores against. `labels list` prints what is on disk. |
 | `eval …` | Run the pipeline over every label file, score it, print the table, write `<config-hash>.json`. `--compare a.json b.json` diffs two results. |
@@ -564,8 +564,8 @@ Key points:
 - An index is self-contained: `migrate` writes `.schema/` into the destination,
   and each file opens with a `# yaml-language-server:` header pointing at it
   (`../.schema/...` from `projects/`, `roles/`, `skills/`; `.schema/...` from the
-  top level). Regenerate with `ats-tailor schema --index index/`. The copy at the
-  repo root, written by `ats-tailor schema`, is the canonical one.
+  top level). Regenerate with `ats-tailor schema --index index/`; the copy inside
+  the index is the canonical one.
 
 Run `ats-tailor validate index/` after editing.
 

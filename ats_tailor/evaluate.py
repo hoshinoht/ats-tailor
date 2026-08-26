@@ -157,15 +157,6 @@ def find_jd(label: Label, slug: str, jd_dir: str | Path | None) -> Path | None:
     return next((c for c in jd_candidates(label, slug, jd_dir) if c.is_file()), None)
 
 
-def resolve_jd(label: Label, slug: str, jd_dir: str | Path | None) -> Path:
-    """:func:`find_jd`, but raising when there is nothing to evaluate against."""
-    found = find_jd(label, slug, jd_dir)
-    if found is None:
-        tried = ", ".join(str(c) for c in jd_candidates(label, slug, jd_dir))
-        raise FileNotFoundError(f"{slug}: no JD file found (tried {tried})")
-    return found
-
-
 def evaluate_one(
     slug: str,
     label: Label,

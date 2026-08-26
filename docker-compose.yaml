@@ -1,7 +1,0 @@
-services:
-  editor:
-    build: ./editor
-    ports:
-      - "8070:8070"
-    volumes:
-      - ../index:/data/index

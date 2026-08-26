@@ -23,7 +23,7 @@ import io
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 from ruamel.yaml import YAML
@@ -415,12 +415,3 @@ def text_map(overrides: Overrides) -> dict[str, str]:
         for bullet_id, replacement in overrides.bullet_text.items()
         if str(replacement).strip()
     }
-
-
-def unknown_bullet_ids(index, ids: Iterable[str]) -> list[str]:
-    known = {
-        bullet.id
-        for item in [*index.roles, *index.projects]
-        for bullet in item.bullets
-    }
-    return [i for i in ids if i not in known]

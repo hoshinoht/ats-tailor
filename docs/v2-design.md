@@ -94,8 +94,9 @@ index/
   projects/<id>.yaml
 ```
 
-Schema (pydantic v2, `ats_tailor/models.py`; JSON Schema emitted to
-`schema/` for editor validation):
+Schema (pydantic v2, `ats_tailor/models.py`; JSON Schema written into
+`<index>/.schema/` by `migrate` or `ats-tailor schema --index`, which the files'
+`$schema` hints point at):
 
 ```yaml
 # skills/cloud-infrastructure.yaml
@@ -453,8 +454,9 @@ that they change *nothing*: `ats-tailor eval --engine v2` over the same 14
 labelled JDs, with every embedding now coming from `data/ats.db` instead of
 `index/.emb_cache/*.npy`, reproduced `eval/f647ef74f75b.json` exactly —
 must 75.02%, nice 33.44%, context 51.43%, parse 14/14, pages 1.00, and every
-per-JD selection, budget and gap list identical (`eval/c353d77de549.json`; the
-config hash moves only because `code_hash` covers the new modules).
+per-JD selection, budget and gap list identical (`eval/c353d77de549.json`, kept
+as the baseline until 3c superseded it; the config hash moves only because
+`code_hash` covers the new modules).
 
 That parity is not automatic and cost two design decisions:
 
@@ -486,13 +488,13 @@ Deviations from `docs/plans/phase-3b.md`, all deliberate:
 ### 3c result (2026-08-26)
 
 `ats-tailor eval --engine v2 --provider none` over the same fourteen labelled
-JDs (`eval/30a5cd1d5a71.json`), against the Phase 3b baseline
-`eval/c353d77de549.json`:
+JDs (`eval/30a5cd1d5a71.json`), against the Phase 3b baseline it replaces
+(`c353d77de549`, deleted with this phase — its numbers are the "3b" column):
 
 | metric | 3b | 3c | delta |
 |---|---|---|---|
 | must_coverage | 75.02% | 75.02% | +0.000 |
-| nice_coverage | 33.44% | 34.44% | **+0.010** |
+| nice_coverage | 33.44% | 34.46% | **+0.010** |
 | context_rate | 51.43% | 51.43% | +0.000 |
 | parse_ok | 100% | 100% | +0.000 |
 | pages | 1.00 | 1.00 | +0.000 |

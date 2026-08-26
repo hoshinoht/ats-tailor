@@ -271,7 +271,3 @@ def get_provider(name: str | None = None, alias_map=None, profile=None, quiet=Fa
     say("  Warning: no LLM provider is reachable (tried "
         f"{', '.join(AUTO_ORDER)}); continuing with the deterministic parser")
     return NoneProvider()
-
-
-def provider_names() -> tuple[str, ...]:
-    return config.PROVIDERS
