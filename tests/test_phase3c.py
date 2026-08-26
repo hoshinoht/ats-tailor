@@ -406,6 +406,128 @@ def test_a_server_with_no_models_loaded_counts_as_absent(monkeypatch):
     assert provider_mod.get_provider("auto", quiet=True).name == "none"
 
 
+# ── 3b. the ollama request, and a reasoning model's two channels ─────────────
+def _fake_ollama(monkeypatch, payload, seen):
+    """Answer ``_post_json`` with ``payload`` and record the body it was sent."""
+    from ats_tailor.llm import backends
+
+    def _post(url, body, timeout):
+        seen.append((url, body))
+        return payload
+
+    monkeypatch.setattr(backends, "_post_json", _post)
+    return backends
+
+
+def test_ollama_reads_the_answer_and_ignores_the_reasoning(monkeypatch, capsys):
+    """``thinking`` is a scratchpad; only ``response`` is the answer.
+
+    A reasoning model returns both, and the JSON downstream must never be
+    parsed out of a discarded draft.
+    """
+    seen = []
+    backends = _fake_ollama(monkeypatch, {
+        "response": '{"title": "SRE Intern"}',
+        "thinking": 'Let me think. Maybe {"title": "wrong guess"} instead.',
+        "done_reason": "stop", "prompt_eval_count": 1960, "eval_count": 769,
+    }, seen)
+
+    raw = backends._ollama_generate("gpt-oss:20b", "prompt", max_tokens=4096)
+
+    assert raw == '{"title": "SRE Intern"}'
+    assert backends._parse_json_object(raw) == {"title": "SRE Intern"}
+    assert "wrong guess" not in raw
+
+
+def test_ollama_sends_a_reasoning_effort_and_the_budget_it_was_given(monkeypatch):
+    seen = []
+    backends = _fake_ollama(monkeypatch, {"response": "ok"}, seen)
+    monkeypatch.setattr(config, "OLLAMA_THINK", "low")
+
+    backends._ollama_generate("gpt-oss:20b", "prompt", max_tokens=4096,
+                              num_ctx=16384)
+
+    _url, body = seen[0]
+    assert body["think"] == "low"
+    assert body["options"]["num_predict"] == 4096
+    assert body["options"]["num_ctx"] == 16384
+    assert "format" not in body  # measured: JSON mode corrupts gpt-oss's answer
+
+
+def test_a_boolean_think_still_reaches_a_model_that_takes_one(monkeypatch):
+    seen = []
+    backends = _fake_ollama(monkeypatch, {"response": "ok"}, seen)
+    monkeypatch.setattr(config, "OLLAMA_THINK", "false")
+
+    backends._ollama_generate("qwen3.5:4b", "prompt")
+
+    assert seen[0][1]["think"] is False
+
+
+def test_a_model_that_rejects_think_is_asked_again_without_it(monkeypatch):
+    """The field is an optimisation, not the request. Losing it is not a failure."""
+    import io
+    from urllib.error import HTTPError
+
+    from ats_tailor.llm import backends
+
+    seen = []
+
+    def _post(url, body, timeout):
+        seen.append(dict(body))
+        if "think" in body:
+            raise HTTPError(url, 400, "Bad Request", {},
+                            io.BytesIO(b'{"error":"model does not support think"}'))
+        return {"response": "ok"}
+
+    monkeypatch.setattr(backends, "_post_json", _post)
+
+    assert backends._ollama_generate("plain:1b", "prompt") == "ok"
+    assert len(seen) == 2 and "think" not in seen[1]
+
+
+def test_an_http_error_that_is_not_about_think_is_not_retried(monkeypatch):
+    import io
+    from urllib.error import HTTPError
+
+    from ats_tailor.llm import backends
+
+    calls = []
+
+    def _post(url, body, timeout):
+        calls.append(body)
+        raise HTTPError(url, 404, "Not Found", {},
+                        io.BytesIO(b'{"error":"model not found"}'))
+
+    monkeypatch.setattr(backends, "_post_json", _post)
+
+    with pytest.raises(HTTPError):
+        backends._ollama_generate("absent:1b", "prompt")
+    assert len(calls) == 1
+
+
+def test_an_answer_that_is_all_reasoning_says_so(monkeypatch, capsys):
+    """The failure that made gpt-oss unusable at first, named in the log.
+
+    An empty ``response`` beside a full ``thinking`` and ``done_reason:
+    length`` is a budget spent on reasoning, not a model with nothing to say.
+    """
+    seen = []
+    backends = _fake_ollama(monkeypatch, {
+        "response": "", "thinking": "x" * 20000, "done_reason": "length",
+        "prompt_eval_count": 1960, "eval_count": 4096,
+    }, seen)
+
+    assert backends._ollama_generate("gpt-oss:20b", "p", max_tokens=4096) == ""
+    assert "reasoning" in capsys.readouterr().err
+
+
+def test_the_extraction_budget_leaves_room_for_a_reasoning_preamble():
+    from ats_tailor.llm import provider as provider_mod
+
+    assert provider_mod.EXTRACT_MAX_TOKENS >= 4096
+
+
 # ── 4. gates ─────────────────────────────────────────────────────────────────
 def test_a_citizenship_clause_fails_the_eligibility_gate_with_its_own_words():
     gates = gates_mod.detect_gates(

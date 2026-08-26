@@ -93,6 +93,11 @@ LLM_BACKEND = _str("ATS_LLM_BACKEND", "auto")  # auto | mlx | lmstudio | ollama
 MLX_MODEL = _str("ATS_MLX_MODEL", "mlx-community/Qwen3-8B-4bit")
 LMSTUDIO_URL = _str("ATS_LMSTUDIO_URL", "http://localhost:1234")
 OLLAMA_URL = _str("ATS_OLLAMA_URL", "http://localhost:11434")
+#: Reasoning budget for Ollama's ``think`` field: ``false``/``true`` for a
+#: model that takes a boolean, or ``low``/``medium``/``high`` for one that
+#: takes an effort. Reasoning models ignore ``false`` and spend the whole
+#: generation budget thinking, so an effort is the default.
+OLLAMA_THINK = _str("ATS_OLLAMA_THINK", "low")
 LLM_NUM_CTX = _int("ATS_LLM_NUM_CTX", 4096)
 LLM_TEMPERATURE = _float("ATS_LLM_TEMPERATURE", 0.3)
 LLM_TEMPERATURE_P1 = _float("ATS_LLM_TEMPERATURE_P1", 0.2)

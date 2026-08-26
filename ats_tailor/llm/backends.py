@@ -16,31 +16,81 @@ minutes to be told so.
 import json
 import re
 import sys
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .. import config
 
 
+def _think_option(value=None):
+    """``think`` for ``/api/generate``: a reasoning *budget*, not a boolean.
+
+    A reasoning model ignores ``think: false`` — gpt-oss reasons anyway, and
+    Ollama returns that reasoning in a separate ``thinking`` field while it
+    still counts against ``num_predict``. On a full job posting the whole
+    budget went to reasoning and ``response`` came back empty, whatever the
+    budget was (measured: 4096 tokens, 20k characters of ``thinking``, nothing
+    to parse). The string efforts *are* honoured, so ``low`` is the setting
+    that makes the answer arrive at all.
+
+    Booleans still pass through, because the older models this backend serves
+    take one and would reject an effort string.
+    """
+    raw = str(config.OLLAMA_THINK if value is None else value).strip().lower()
+    if raw in ("false", "0", "no", "off", "none", ""):
+        return False
+    if raw in ("true", "1", "yes", "on"):
+        return True
+    return raw  # "low" | "medium" | "high" — Ollama validates it, not us
+
+
+def _post_json(url, body, timeout):
+    req = Request(url, data=json.dumps(body).encode(),
+                  headers={"Content-Type": "application/json"})
+    with urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
 def _ollama_generate(model_name, prompt, label="LLM", temperature=None,
                      max_tokens=512, num_ctx=None):
-    """Send a single prompt to ollama and return the raw response text."""
+    """Send a single prompt to ollama and return the raw response text.
+
+    Only ``response`` is the answer. ``thinking`` is the model's scratchpad and
+    is deliberately dropped: handing a reasoning transcript to the JSON parser
+    downstream would let a discarded draft become the extraction.
+    """
     opts = {"num_predict": int(max_tokens),
             "num_ctx": int(num_ctx or config.LLM_NUM_CTX)}
     if temperature is not None:
         opts["temperature"] = temperature
-    payload = json.dumps(
-        {"model": model_name, "prompt": prompt, "stream": False,
-         "options": opts, "think": False}).encode()
-    req = Request(f"{config.OLLAMA_URL}/api/generate", data=payload,
-                  headers={"Content-Type": "application/json"})
-    with urlopen(req, timeout=config.LLM_TIMEOUT) as resp:
-        data = json.loads(resp.read())
-        raw = data["response"]
-        p_tok = data.get("prompt_eval_count", 0)
-        g_tok = data.get("eval_count", 0)
-        print(f"  {label} tokens: {p_tok} prompt + {g_tok} generated "
-              f"= {p_tok + g_tok} / {config.LLM_NUM_CTX} ctx",
+    body = {"model": model_name, "prompt": prompt, "stream": False,
+            "options": opts, "think": _think_option()}
+    url = f"{config.OLLAMA_URL}/api/generate"
+    try:
+        data = _post_json(url, body, config.LLM_TIMEOUT)
+    except HTTPError as exc:
+        # A model with no thinking capability rejects the field outright; the
+        # prompt is still perfectly answerable without it.
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+        if "think" not in detail.lower():
+            raise
+        body.pop("think", None)
+        data = _post_json(url, body, config.LLM_TIMEOUT)
+
+    raw = data.get("response") or ""
+    p_tok = data.get("prompt_eval_count", 0)
+    g_tok = data.get("eval_count", 0)
+    print(f"  {label} tokens: {p_tok} prompt + {g_tok} generated "
+          f"= {p_tok + g_tok} / {config.LLM_NUM_CTX} ctx",
+          file=sys.stderr)
+    if not raw and data.get("thinking"):
+        print(f"  Warning: {label} spent its whole budget reasoning "
+              f"(done_reason={data.get('done_reason')}) and answered nothing; "
+              f"lower ATS_OLLAMA_THINK or raise the token budget",
               file=sys.stderr)
     return raw
 

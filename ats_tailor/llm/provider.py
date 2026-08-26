@@ -30,8 +30,10 @@ from ..jd.models import JDProfile
 from . import backends
 
 #: Tokens an extraction answer may take. A posting's worth of JSON is long, and
-#: v1's 512 would truncate it mid-object.
-EXTRACT_MAX_TOKENS = 2048
+#: v1's 512 would truncate it mid-object. A reasoning model spends part of this
+#: budget before it writes anything, so there is headroom above the ~800 tokens
+#: a profile actually costs.
+EXTRACT_MAX_TOKENS = 4096
 #: Context window an extraction needs: the prompt carries the whole posting.
 EXTRACT_NUM_CTX = 16384
 RERANK_MAX_TOKENS = 256
