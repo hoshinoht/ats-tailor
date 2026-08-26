@@ -61,8 +61,21 @@ def recency_multiplier(period):
 
 
 def load_index(index_dir):
-    """Load all YAML index files from the given directory."""
+    """Load the index from either the v1 flat files or the v2 per-entity layout.
+
+    Both layouts are projected onto the same five v1 dicts, so the rest of the
+    pipeline is unaware of which one is on disk.
+    """
+    from .index_io import detect_layout, load_index_v2, to_legacy
+
     index_dir = Path(index_dir)
+    if detect_layout(index_dir) == "v2":
+        skills_data, projects_data, exp_data, certs_data, summary_data = to_legacy(
+            load_index_v2(index_dir)
+        )
+        validate_index(skills_data, projects_data, exp_data, certs_data, summary_data)
+        return skills_data, projects_data, exp_data, certs_data, summary_data
+
     skills_data = _load_yaml(index_dir / "skills.yaml")
     projects_data = _load_yaml(index_dir / "projects.yaml")
     exp_data = _load_yaml(index_dir / "experience.yaml")

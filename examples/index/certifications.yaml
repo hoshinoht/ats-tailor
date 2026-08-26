@@ -1,7 +1,10 @@
-# Certifications with issuer and ATS keyword mapping.
+# yaml-language-server: $schema=.schema/certifications.schema.json
 
 certifications:
-  - id: "aws-ccp"
-    name: "AWS Cloud Practitioner"
-    issuer: "Amazon Web Services"
-    ats_keywords: ["AWS", "Cloud", "Amazon Web Services"]
+  - id: aws-ccp
+    name: AWS Cloud Practitioner
+    issuer: Amazon Web Services
+    skills:
+      - aws
+    keywords:
+      - Cloud

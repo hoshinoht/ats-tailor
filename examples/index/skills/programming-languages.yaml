@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=../.schema/skills.schema.json
+
+category: Programming Languages
+skills:
+  - id: python
+    name: Python
+    proficiency: advanced
+    aliases:
+      - python3
+  - id: go
+    name: Go
+    proficiency: intermediate
+    aliases:
+      - Golang
+  - id: javascript
+    name: JavaScript
+    proficiency: intermediate
+    aliases:
+      - JS
+      - ES6
+    acronym: JS
+  - id: sql
+    name: SQL
+    proficiency: intermediate
+    aliases:
+      - PostgreSQL
+      - MySQL

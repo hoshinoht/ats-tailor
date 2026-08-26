@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=../.schema/role.schema.json
+
+id: acme-swe
+company: Acme Corp
+title: Software Engineer Intern
+type: internship
+period: {start: 2024-06, end: 2024-12}
+skills:
+  - go
+  - python
+  - docker
+  - postgresql
+keywords:
+  - Microservices
+  - REST
+bullets:
+  - id: acme-swe.b1
+    kind: responsibility
+    text: Developed microservice handling 1,000+ daily transactions with Go and PostgreSQL
+    skills:
+      - go
+      - sql
+      - postgresql
+    metrics:
+      - 1,000+
+  - id: acme-swe.b2
+    kind: responsibility
+    text: Reduced API response latency by 40% through query optimization and caching
+    metrics:
+      - 40%
+  - id: acme-swe.b3
+    kind: responsibility
+    text: Wrote integration tests covering 90% of critical payment workflows
+    metrics:
+      - 90%

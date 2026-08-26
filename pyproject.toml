@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ats-tailor"
+version = "0.2.0"
+description = "ATS-optimised one-page LaTeX resume generator driven by a YAML content index"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "pyyaml",
+    "ruamel.yaml",
+    "pydantic>=2",
+    "sentence-transformers",
+    "numpy",
+    "jinja2",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+mlx = ["mlx-lm"]
+rerank = []
+dev = ["pytest"]
+
+[project.scripts]
+ats-tailor = "ats_tailor.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ats_tailor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "default": {
+      "type": "string",
+      "default": "",
+      "title": "Default"
+    },
+    "variants": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Variants",
+      "type": "object"
+    },
+    "highlights": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Highlights",
+      "type": "array"
+    }
+  },
+  "title": "Summaries",
+  "type": "object"
+}

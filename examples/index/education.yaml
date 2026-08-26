@@ -1,0 +1,7 @@
+# yaml-language-server: $schema=.schema/education.schema.json
+
+education:
+  - institution: Example University
+    degree: BSc (Hons)
+    field: Computer Science
+    period: {start: "2022", end: "2026"}

@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=../.schema/project.schema.json
+
+id: mlpipe
+name: MLPipe
+type: solo
+period: {start: 2024-08, end: 2024-12}
+summary: End-to-end ML pipeline for time-series forecasting
+tech_stack:
+  languages:
+    - Python
+  frameworks:
+    - PyTorch
+    - scikit-learn
+  infrastructure:
+    - Docker
+    - AWS
+  patterns:
+    - ML Pipeline
+    - Feature Engineering
+  tools:
+    - MLflow
+    - DVC
+    - pytest
+skills:
+  - aws
+  - docker
+  - python
+keywords:
+  - Machine Learning
+  - PyTorch
+  - LSTM
+  - MLflow
+bullets:
+  - id: mlpipe.r1
+    kind: responsibility
+    text: Built automated feature engineering pipeline processing 2M+ records daily
+    metrics:
+      - 2M+
+  - id: mlpipe.r2
+    kind: responsibility
+    text: Trained LSTM models achieving 15% MAPE improvement over baseline ARIMA
+    metrics:
+      - 15%
+  - id: mlpipe.r3
+    kind: responsibility
+    text: Deployed model serving endpoint on AWS with Docker, handling 200 req/s
+    skills:
+      - docker
+      - aws
+    metrics:
+      - 200 req

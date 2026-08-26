@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=../.schema/project.schema.json
+
+id: taskflow
+name: TaskFlow
+type: team
+period: {start: 2025-01, end: present}
+summary: Real-time task management platform with microservices backend
+tech_stack:
+  languages:
+    - Python
+    - Go
+    - JavaScript
+  frameworks:
+    - FastAPI
+    - React
+  infrastructure:
+    - Docker
+    - PostgreSQL
+    - Redis
+  patterns:
+    - REST
+    - Event-Driven Architecture
+    - Microservices
+  tools:
+    - pytest
+    - Prometheus
+    - Grafana
+skills:
+  - docker
+  - postgresql
+  - python
+  - go
+keywords:
+  - Microservices
+  - REST
+  - Event-Driven
+  - FastAPI
+bullets:
+  - id: taskflow.r1
+    kind: responsibility
+    text: Designed REST API gateway handling 500+ req/s with FastAPI and async workers
+    metrics:
+      - 500+
+  - id: taskflow.r2
+    kind: responsibility
+    text: Built event-driven notification service using Redis pub/sub for real-time updates
+  - id: taskflow.r3
+    kind: responsibility
+    text: Implemented CI/CD pipeline with Docker multi-stage builds reducing image size by 60%
+    skills:
+      - docker
+    metrics:
+      - 60%

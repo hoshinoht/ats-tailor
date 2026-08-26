@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=../.schema/skills.schema.json
+
+category: Cloud & Infrastructure
+skills:
+  - id: docker
+    name: Docker
+    proficiency: advanced
+    aliases:
+      - Containers
+      - Containerization
+  - id: aws
+    name: AWS
+    proficiency: intermediate
+    aliases:
+      - Amazon Web Services
+      - EC2
+      - S3
+    acronym: S3
+  - id: kubernetes
+    name: Kubernetes
+    proficiency: familiar
+    aliases:
+      - K8s
+      - Container Orchestration
+  - id: postgresql
+    name: PostgreSQL
+    proficiency: intermediate
+    aliases:
+      - Postgres
+      - RDBMS
+    acronym: RDBMS

@@ -9,3 +9,5 @@ output/
 dist/
 build/
 .DS_Store
+data/
+.emb_cache/

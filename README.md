@@ -5,8 +5,29 @@ Semantic resume tailoring for ATS. Scores your YAML resume index against a job d
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+uv sync --extra dev     # creates .venv from pyproject.toml + uv.lock
+uv run ats-tailor --help
 ```
+
+`pip install -r requirements.txt` also works — `requirements.txt` is a pointer to
+`-e .`, so it installs the same dependency set from `pyproject.toml`.
+
+Optional extras: `--extra mlx` (local MLX inference), `--extra dev` (pytest).
+
+## CLI
+
+```bash
+ats-tailor <command> [options]
+```
+
+| Command | Description |
+| ------- | ----------- |
+| `tailor …` | Generate a tailored resume. Arguments are identical to `python -m ats_tailor.tailor` (see below). |
+| `validate [index_dir]` | Load an index in either layout; print schema errors (exit 1) and non-fatal warnings (exit 0). |
+| `migrate <src> <dst> [--force]` | Convert a v1 index directory into the v2 layout and print a migration report. |
+| `schema [--out DIR \| --index DIR]` | Write JSON Schema files for the v2 index. `--out` (default `schema/`) writes a standalone copy; `--index DIR` writes them into `DIR/.schema/`, where the files' `$schema` hints point. |
+
+`python -m ats_tailor.tailor …` remains supported and is unchanged.
 
 ## Usage
 
@@ -126,14 +147,88 @@ If `ATS_LLM_EXPAND=true` is set in the environment, pass `--no-llm` to force a n
 | `match_report.md` | Similarity scores and rankings                  |
 | `match_viz.png`   | Visual score breakdown                          |
 
-## Index format
+## Index layout (v2)
 
-See `examples/index/` for the expected YAML structure:
+One YAML file per entity, so edits produce small readable diffs. See
+`examples/index/` for a working example and `docs/v2-design.md` §3 for the
+rationale.
+
+```
+index/
+  .schema/<kind>.schema.json    # generated; what the $schema hints resolve to
+  education.yaml                # list of education entries
+  summaries.yaml                # default summary + archetype variants + highlights
+  certifications.yaml           # list of certifications
+  skills/<category-slug>.yaml   # one category of the skill taxonomy
+  roles/<id>.yaml               # one work role; filename stem must equal `id`
+  projects/<id>.yaml            # one project; filename stem must equal `id`
+```
+
+```yaml
+# projects/carehaven.yaml
+id: carehaven
+name: CareHaven
+type: academic                          # optional, free string
+repo: hoshinoht/carehaven               # optional
+period: {start: 2025-10, end: 2026-04}  # YYYY-MM or YYYY; end may be `present`
+summary: Full-stack caregiver platform with an event-driven backend
+tech_stack:
+  languages: [C#, Dart, Go]
+  frameworks: [.NET 10, Flutter]
+skills: [csharp, dotnet, grpc]          # skill ids from skills/*.yaml
+keywords: [Wolverine, event-driven]     # item-specific terms outside the taxonomy
+bullets:
+  - id: carehaven.r1                    # stable; never renumber
+    kind: responsibility                # responsibility | impact
+    text: Architected a gRPC API gateway with Firebase auth and rate limiting
+    skills: [grpc, firebase]
+    metrics: []                         # quantities a rewrite must preserve
+    variants: {}                        # archetype -> alternate phrasing
+```
+
+Key points:
+
+- `ats_tags` are gone. An item's matching terms are its `keywords` plus the
+  name/aliases/acronym of every skill it and its bullets reference.
+- Ids are unique across roles, projects and certifications; every skill id and
+  evidence `ref` must resolve. A role with no bullets must be `hidden: true`.
+- Periods are structured; the renderer formats them as `Mon YYYY - Mon YYYY`
+  with an ASCII hyphen. En-dash date ranges are a silent ATS import failure.
+- Files are written with `ruamel.yaml` round-trip, so comments and key order
+  survive edits made by the CLI.
+- Only fields that differ from their default are written, so a bullet with no
+  skills, metrics or variants is just `id`/`kind`/`text`.
+- An index is self-contained: `migrate` writes `.schema/` into the destination,
+  and each file opens with a `# yaml-language-server:` header pointing at it
+  (`../.schema/...` from `projects/`, `roles/`, `skills/`; `.schema/...` from the
+  top level). Regenerate with `ats-tailor schema --index index/`. The copy at the
+  repo root, written by `ats-tailor schema`, is the canonical one.
+
+Run `ats-tailor validate index/` after editing.
+
+### Legacy layout (v1)
+
+The original four-file layout still loads unchanged — the pipeline detects it by
+the absence of an `index/projects/` directory:
 
 - **skills.yaml** -- categories with `ats_keywords` and `proficiency`
 - **projects.yaml** -- projects with `tech_stack`, `responsibilities`, `ats_tags`
 - **experience.yaml** -- roles with `bullets`, `skills_used`, `ats_tags`; education entries
 - **certifications.yaml** -- certs with `issuer` and `ats_keywords`
+
+`examples/index_v1/` is a v1 index kept for reference and tests. To move an
+existing index to v2:
+
+```bash
+ats-tailor migrate index/ index_v2/
+ats-tailor validate index_v2/
+```
+
+The migrator partitions each `ats_tags` list into skill references and
+keywords, turns `responsibilities`/`impact`/`bullets` into structured bullets
+with pre-filled metrics, parses period strings, and marks bulletless roles
+`hidden`. It refuses to write into a non-empty destination without `--force`,
+and never modifies the source.
 
 To start with your own data, copy `examples/`, fill in your details, and run against real job descriptions.
 
