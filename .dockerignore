@@ -1,0 +1,27 @@
+# The image is the engine, never anybody's data.
+.git
+.gitignore
+.venv
+.env
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+**/.emb_cache
+
+# Derived, personal, or both.
+output/
+data/
+jd/
+labels/
+eval/
+tailored_resumes/
+examples/data/
+
+# Not needed to run anything.
+docs/
+tests/
+Dockerfile
+.dockerignore
+docker-compose.yaml

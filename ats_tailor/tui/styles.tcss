@@ -1,0 +1,215 @@
+/* One stylesheet for the whole app.
+
+   The panes are bordered rather than separated by blank space because the
+   three-pane Tailor screen has to stay readable at 100x30, and a border title
+   is the cheapest label a column can carry. */
+
+Screen {
+    layers: base overlay;
+}
+
+#tabs {
+    height: 1fr;
+}
+
+TabPane {
+    padding: 0 1;
+}
+
+#statusbar {
+    height: auto;
+    dock: bottom;
+    background: $panel;
+}
+
+#status-left {
+    color: $text-muted;
+    height: 1;
+}
+
+#status-busy {
+    height: auto;
+    color: $warning;
+}
+
+.pane {
+    border: round $primary-darken-2;
+    border-title-color: $text-muted;
+    padding: 0 1;
+    height: 1fr;
+}
+
+/* ── Applications ── */
+#applications-table {
+    height: 1fr;
+}
+
+#applications-detail {
+    height: auto;
+    min-height: 2;
+    padding: 0 1;
+    background: $panel;
+}
+
+/* ── Tailor ── */
+#tailor-columns {
+    height: 1fr;
+}
+
+#tailor-left {
+    width: 2fr;
+    min-width: 28;
+}
+
+#tailor-centre {
+    width: 3fr;
+    min-width: 30;
+}
+
+#tailor-right {
+    width: 2fr;
+    min-width: 24;
+}
+
+#tailor-gates {
+    height: auto;
+    max-height: 5;
+}
+
+#tailor-header {
+    height: auto;
+    background: $panel;
+}
+
+#tailor-requirements,
+#tailor-selection {
+    height: 1fr;
+}
+
+#tailor-preview-scroll {
+    height: 1fr;
+}
+
+#tailor-overrides {
+    height: auto;
+}
+
+/* ── Index ── */
+#index-columns {
+    height: 1fr;
+}
+
+#index-left {
+    width: 1fr;
+    min-width: 24;
+}
+
+#index-centre {
+    width: 2fr;
+    min-width: 32;
+}
+
+#index-right {
+    width: 1fr;
+    min-width: 24;
+}
+
+#index-fields {
+    height: auto;
+}
+
+.field-label {
+    color: $text-muted;
+}
+
+.field-input {
+    height: 3;
+}
+
+#index-bullets {
+    height: 12;
+}
+
+#index-metrics,
+#index-errors {
+    height: auto;
+}
+
+#index-impact {
+    height: 1fr;
+}
+
+/* ── Eval ── */
+#eval-columns {
+    height: 1fr;
+}
+
+#eval-left {
+    width: 1fr;
+    min-width: 30;
+}
+
+#eval-right {
+    width: 2fr;
+}
+
+#eval-table {
+    height: 1fr;
+}
+
+#eval-detail {
+    height: auto;
+}
+
+/* Below 90 columns the third pane goes; two panes at 45 columns each still
+   read, three at 30 do not. */
+.narrow #tailor-right,
+.narrow #index-right {
+    display: none;
+}
+
+/* ── Dialogs ── */
+.dialog {
+    background: $surface;
+    border: thick $primary;
+    padding: 1 2;
+    width: 60;
+    height: auto;
+    max-height: 80%;
+    margin: 2 4;
+}
+
+.dialog-wide {
+    width: 90%;
+    height: 80%;
+}
+
+.dialog-title {
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+.dialog-subtitle {
+    color: $text-muted;
+    padding-top: 1;
+}
+
+.dialog-buttons {
+    height: auto;
+    padding-top: 1;
+}
+
+#choice-list,
+#compare-list {
+    height: auto;
+    max-height: 16;
+}
+
+#posting-text {
+    height: 1fr;
+    min-height: 8;
+}
+
+ModalScreen {
+    align: center middle;
+}

@@ -24,7 +24,8 @@ dependencies = [
 [project.optional-dependencies]
 mlx = ["mlx-lm"]
 rerank = []
-dev = ["pytest"]
+dev = ["pytest", "pytest-asyncio"]
+tui = ["textual>=0.80", "textual-image", "textual-serve"]
 
 [project.scripts]
 ats-tailor = "ats_tailor.cli:main"
@@ -40,3 +41,5 @@ ats-match = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "packages/ats-match/tests"]
+# The TUI tests drive Textual's pilot, which is async.
+asyncio_mode = "auto"

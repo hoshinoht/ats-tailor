@@ -12,7 +12,13 @@ uv run ats-tailor --help
 `uv` is canonical; `pip install -e .` installs the same dependency set from
 `pyproject.toml` if you would rather use a virtualenv of your own.
 
-Optional extras: `--extra mlx` (local MLX inference), `--extra dev` (pytest).
+Optional extras: `--extra tui` (the Textual front-end), `--extra mlx` (local
+MLX inference), `--extra dev` (pytest, pytest-asyncio).
+
+```bash
+uv sync --extra dev --extra tui
+uv run ats-tailor tui --repo ..
+```
 
 The repo is a `uv` workspace with two distributions: this application, and
 `packages/ats-match` — the pure matching core. `uv sync` builds both.
@@ -34,6 +40,7 @@ ats_tailor/
   evaluation/      labels and the scoring sweep
   runs/            SQLite store, index sync, tracker, per-run overrides
   mcp/             the stdio MCP server
+  tui/             the Textual front-end (`tui`, `serve`)
   tailor.py        compatibility shim for `python -m ats_tailor.tailor`
 ```
 
@@ -63,6 +70,8 @@ ats-tailor <command> [options]
 | `fit <slug> [--json]` | Cheap triage before a run: the hard gates, the best requirement coverage the index could reach, the claims carrying it, and the terms nothing covers. No selection, no LaTeX, no PDF. |
 | `review-pack <run> [--json]` | One run's posting, gates, requirements, selected claims and coverage table in one payload — what a reviewing agent reads. |
 | `mcp --repo DIR [--provider …] [--allow-eval]` | Serve the repository to an agent runtime over stdio (Model Context Protocol). Silent while idle. `--allow-eval` additionally exposes the scoring sweep. |
+| `tui [--repo DIR] [--provider …]` | The Textual front-end: applications, one run in three panes, the index, the eval baselines. Needs the `tui` extra. |
+| `serve [--repo DIR] [--host] [--port]` | The same app in a browser over HTTP (`textual-serve`). Defaults to `localhost:8000`; the container image serves `0.0.0.0:8080`. |
 
 `python -m ats_tailor.tailor …` remains supported and is unchanged.
 
@@ -153,6 +162,7 @@ cp .env.example .env
 | `ATS_SKILL_MIN_GAIN`        | `0.03`                        | — (v2)          |
 | `ATS_PIN_SKILL_GROUPS`      | `Programming Languages`       | — (v2)          |
 | `ATS_HEADER_CLAIMS`         | `false`                       | — (v2)          |
+| `ATS_LATEX_ENGINE`          | `auto`                        | —               |
 | `ATS_DATA_DIR`              | `<index>/../data/`            | `--data-dir`    |
 
 CLI flags override env vars; env vars override `.env` file values.
@@ -460,6 +470,120 @@ the index, not about the selection: no amount of tailoring fixes it, and the
 listed gaps are the evidence that is missing. Requirements naming nothing at
 all ("works well in a team") are excluded from the average — every claim
 answers them about equally well, so their ceiling measures the encoder.
+
+## TUI
+
+```bash
+uv sync --extra tui
+ats-tailor tui --repo ~/projects/personal/resume
+```
+
+Four screens, reachable with `1`–`4`. Every one of them is a client of
+`Service` and nothing else: no screen imports the pipeline, the solver or the
+store, and every call it makes runs on a worker thread with a busy indicator,
+so a two-minute re-run never freezes the terminal.
+
+| Screen | What it is | Keys |
+| ------ | ---------- | ---- |
+| **1 Applications** | Every recorded run: id, when, company/role, status, pages, must/nice/context coverage, and how long it has been quiet. A `⚠` on the status means the posting's gates flagged something. | `enter` open in Tailor · `s` set status · `n` add a note · `q` quiet-only filter · `a` add a posting (paste → sanitise → `fit`) · `ctrl+r` reload |
+| **2 Tailor** | One run in three panes: the gates and the requirements coloured by coverage (green ≥ 0.6, amber ≥ 0.3, red) with their weights; the `pdftotext -layout` text — what an ATS actually reads — under a `page N / must X% / ctx Y%` header; the selected items and bullets grouped by section with the gain each one bought. | `p`/`x` pin/exclude the item · `P`/`X` pin/exclude the bullet · `w` reweight the requirement (0.25 · 0.5 · 1 · 1.5) · `r` re-run · `c` compile + check · `o` open the PDF · `i` inline raster of page 1 · `l` promote pins into the label · `ctrl+r` reload |
+| **3 Index** | The tree (projects · roles · skills by category · certifications), a form for the selected entity, and an **impact** panel: where that item ranked in every run on record. Bullets edit as `<bullet id> :: <text>`, one per line; metrics are shown read-only. | `ctrl+s` validate the whole index and save · `ctrl+r` reload from disk |
+| **4 Eval** | The `eval/*.json` baselines with their means, and the rendered table for whichever is highlighted. | `e` run the sweep (engine and provider are asked for) · `d` diff two baselines · `ctrl+r` reload |
+
+Global: `?` help, `ctrl+p` provider picker (`auto`/`ollama`/`lmstudio`/`mlx`/
+`none`/`external`), `ctrl+q` quit. The status bar carries the repository, the
+selection and LaTeX engines, the provider and the store path.
+
+Pins and exclusions are written into the run's `overrides.yaml` the moment they
+are pressed; `r` is what pays for them. That split is deliberate — choosing is
+instant, re-running is a minute — and it means the file on disk always matches
+what the screen shows, even when the re-run never happens.
+
+The layout is built for 100×30. Below 90 columns the right-hand pane is hidden
+(two panes at 45 columns read; three at 30 do not); the keys still work on
+whatever has focus.
+
+`i` needs a terminal that can draw images (Kitty graphics, iTerm2 or sixel) and
+`pdftoppm` on the PATH. Where either is missing it says so and points at the
+rendered PNG instead of failing.
+
+### In a browser
+
+```bash
+ats-tailor serve --repo ~/projects/personal/resume --port 8000
+```
+
+`textual-serve` runs the same app, one subprocess per connected browser. There
+is no authentication in front of it: anyone who can reach the port can edit the
+index and start runs, so bind it to `localhost` unless something else is doing
+the authenticating.
+
+`--public-url` is the address the served page tells the browser to load its
+assets from. It only matters when that differs from the bind address — behind a
+proxy, or in the container, where binding `0.0.0.0` would otherwise put
+`http://0.0.0.0:8080/static/…` into the HTML. The compose file passes
+`--public-url ${ATS_PUBLIC_URL:-http://localhost:8080}` for exactly that
+reason.
+
+## Container
+
+The image is the engine — Python, Tectonic and poppler, no TeX Live — and the
+repository is a bind mount. Nothing about one person's index, postings or runs
+is baked in.
+
+```bash
+# from the resume repository (the parent of ats-tailor/)
+docker compose -f ats-tailor/docker-compose.yaml build
+docker compose -f ats-tailor/docker-compose.yaml up                  # browser UI on :8080
+docker compose -f ats-tailor/docker-compose.yaml run --rm -it app tui
+docker compose -f ats-tailor/docker-compose.yaml run --rm app tailor jd/cpf.txt "CPF Board" "SRE Intern" --check
+docker compose -f ats-tailor/docker-compose.yaml run --rm app runs list
+```
+
+`REPO` says which repository to mount and defaults to `..` — the resume
+repository this engine is a submodule of. Point it elsewhere to drive another
+one with the same image:
+
+```bash
+REPO=~/work/other-resume docker compose -f ats-tailor/docker-compose.yaml run --rm app fit acme
+```
+
+Mounted: `index/`, `jd/`, `labels/`, `output/`, `eval/`, `data/` and
+`profile.yaml`. Two named volumes hold the caches worth keeping between runs —
+the embedding model (`hf-cache`) and Tectonic's package bundle
+(`tectonic-cache`).
+
+The LLM stays on the host: there is no GPU inside Docker on macOS, so
+`ATS_LLM_PROVIDER=ollama` and `ATS_OLLAMA_URL=http://host.docker.internal:11434`
+point at an Ollama running natively. MLX is not available in the container at
+all. `ATS_LATEX_ENGINE=tectonic` because there is no `latexmk` in the image.
+
+**Air-gapped runs.** The first run downloads the embedding model into
+`hf-cache` and the LaTeX packages into `tectonic-cache`. After that:
+
+```bash
+HF_HUB_OFFLINE=1 docker compose -f ats-tailor/docker-compose.yaml run --rm app tailor jd/cpf.txt "CPF Board" "SRE Intern" --check
+```
+
+With `HF_HUB_OFFLINE=1` `sentence-transformers` never reaches the network and
+fails loudly if the model is not in the volume, rather than hanging on a
+resolve. Tectonic reads its bundle from the cache the same way.
+
+**Ownership.** On Docker Desktop a bind mount is writable whatever uid the
+container runs as. On Linux it is not — set `ATS_UID`/`ATS_GID` to your own so
+`output/` and `data/` do not fill with root-owned files:
+
+```bash
+ATS_UID=$(id -u) ATS_GID=$(id -g) docker compose -f ats-tailor/docker-compose.yaml run --rm app check output/cpf-sre-intern
+```
+
+### `ATS_LATEX_ENGINE`
+
+`auto` (the default) uses `latexmk` when it is on the PATH and Tectonic
+otherwise; `latexmk` and `tectonic` name one explicitly and fail if it is
+missing rather than quietly typesetting with the other. Everything downstream
+reads the PDF's text layer, so the parse and keyword checks are the same either
+way — which is the point: the container measures what the laptop measures.
 
 ## Output
 

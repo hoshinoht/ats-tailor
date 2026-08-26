@@ -525,7 +525,7 @@ def test_the_healthcheck_answers_before_anything_else_has_been_done(tools):
     assert payload["ok"] is True
     assert payload["index"]["ok"] and payload["index"]["roles"] == 1
     assert payload["directories"]["index"]["path"] == "index"
-    assert set(payload["tools"]) == {"latexmk", "pdftotext", "pdfinfo"}
+    assert set(payload["tools"]) == {"latexmk", "tectonic", "pdftotext", "pdfinfo"}
 
 
 def test_a_posting_only_ever_comes_back_inside_the_trust_boundary(tools):

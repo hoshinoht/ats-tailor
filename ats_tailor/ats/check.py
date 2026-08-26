@@ -19,6 +19,7 @@ the LaTeX source, because what an ATS ingests is the PDF's text layer:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -134,10 +135,64 @@ class CompileResult:
 
 
 class CompileError(RuntimeError):
-    """``latexmk`` failed; the message carries the tail of its log."""
+    """The LaTeX engine failed; the message carries the tail of its log."""
 
 
 # ── Compilation ───────────────────────────────────────────────────────────────
+#: What ``ATS_LATEX_ENGINE`` may say. ``auto`` prefers ``latexmk`` — a TeX Live
+#: install is what a laptop has and what every measured baseline was produced
+#: with — and falls back to Tectonic, which is the single static binary the
+#: container ships instead of a two-gigabyte distribution.
+LATEX_ENGINES: tuple[str, ...] = ("auto", "latexmk", "tectonic")
+
+#: The default when neither the caller nor the environment says. Spelled here
+#: rather than imported from :mod:`ats_tailor.config` so that a test can set
+#: ``ATS_LATEX_ENGINE`` after import and be believed.
+DEFAULT_LATEX_ENGINE = "auto"
+
+
+def resolve_latex_engine(engine: str | None = None) -> str:
+    """``latexmk`` or ``tectonic``: the engine a compile would actually use.
+
+    Resolution order is the explicit argument, then ``ATS_LATEX_ENGINE``, then
+    :data:`DEFAULT_LATEX_ENGINE`. ``auto`` asks the PATH; a named engine is
+    returned whether or not it is installed, because "tectonic is missing" is a
+    better error than a silent fall back to a different typesetter than the one
+    the caller asked for.
+    """
+    value = str(
+        engine or os.environ.get("ATS_LATEX_ENGINE") or DEFAULT_LATEX_ENGINE
+    ).strip().lower()
+    if value not in LATEX_ENGINES:
+        raise ValueError(
+            f"unknown LaTeX engine {value!r}; expected one of: "
+            f"{', '.join(LATEX_ENGINES)}"
+        )
+    if value == "auto":
+        return "latexmk" if shutil.which("latexmk") else "tectonic"
+    return value
+
+
+def latex_command(engine: str, tex_name: str) -> list[str]:
+    """The argv for one non-interactive compile of ``tex_name`` in its own dir."""
+    if engine == "latexmk":
+        return ["latexmk", "-pdf", "-interaction=nonstopmode", "-halt-on-error", tex_name]
+    if engine == "tectonic":
+        # ``--keep-logs`` because the page count and every compile error are read
+        # out of the ``.log``; Tectonic deletes it otherwise. ``--chatter minimal``
+        # keeps a service that must not print from printing.
+        return ["tectonic", "--keep-logs", "--chatter", "minimal", tex_name]
+    raise ValueError(f"unknown LaTeX engine {engine!r}")
+
+
+def latex_available(engine: str | None = None) -> bool:
+    """Whether the engine a compile would use is on the PATH."""
+    try:
+        return bool(shutil.which(resolve_latex_engine(engine)))
+    except ValueError:
+        return False
+
+
 def output_filename(name: str, company: str) -> str:
     """``<First>_<Last>_Resume_<Company>.pdf`` with every non-alnum run as ``_``."""
     parts = [p for p in re.split(r"\s+", name.strip()) if p]
@@ -152,34 +207,46 @@ def _alnum(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", str(text)).strip("_")
 
 
-def compile_pdf(tex_path: str | Path, out_name: str | None = None) -> CompileResult:
-    """Compile ``tex_path`` with latexmk, clean the aux files, count the pages.
+def compile_pdf(
+    tex_path: str | Path, out_name: str | None = None, *, engine: str | None = None
+) -> CompileResult:
+    """Compile ``tex_path``, clean the aux files, count the pages.
+
+    ``engine`` is ``auto`` | ``latexmk`` | ``tectonic``, defaulting to
+    ``ATS_LATEX_ENGINE`` (see :func:`resolve_latex_engine`). Everything after
+    the compile is engine-agnostic: both write ``<stem>.pdf`` and a standard
+    TeX ``<stem>.log`` beside the source, and every check downstream reads the
+    PDF's text layer rather than anything the typesetter said.
 
     The log is copied to ``<stem>.compile.log`` *before* ``latexmk -c`` runs,
-    since the clean-up takes ``.log`` with it.
+    since the clean-up takes ``.log`` with it. Tectonic leaves no aux files to
+    clean, so it gets no clean-up pass.
     """
     tex_path = Path(tex_path).resolve()
     work_dir = tex_path.parent
+    engine = resolve_latex_engine(engine)
     result = subprocess.run(
-        ["latexmk", "-pdf", "-interaction=nonstopmode", "-halt-on-error", tex_path.name],
+        latex_command(engine, tex_path.name),
         cwd=work_dir, capture_output=True, text=True,
     )
     log_path = work_dir / f"{tex_path.stem}.log"
     log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
     if result.returncode != 0:
-        tail = "\n".join((log_text or result.stdout).splitlines()[-25:])
-        raise CompileError(f"latexmk failed for {tex_path}:\n{tail}")
+        tail = "\n".join(
+            (log_text or result.stderr or result.stdout).splitlines()[-25:])
+        raise CompileError(f"{engine} failed for {tex_path}:\n{tail}")
 
     pdf_path = work_dir / f"{tex_path.stem}.pdf"
     if not pdf_path.exists():
-        raise CompileError(f"latexmk reported success but {pdf_path} is missing")
+        raise CompileError(f"{engine} reported success but {pdf_path} is missing")
 
     kept_log = work_dir / f"{tex_path.stem}.compile.log"
     if log_text:
         kept_log.write_text(log_text)
     pages = page_count(pdf_path, log_text)
-    subprocess.run(["latexmk", "-c", tex_path.name], cwd=work_dir,
-                   capture_output=True, text=True)
+    if engine == "latexmk":
+        subprocess.run(["latexmk", "-c", tex_path.name], cwd=work_dir,
+                       capture_output=True, text=True)
 
     if out_name:
         shutil.copyfile(pdf_path, work_dir / out_name)

@@ -63,7 +63,11 @@ from .index.models import (
     Summaries,
 )
 from .runs.overrides import Overrides, overrides_path
-from .runs.store import Run, Store, StatusError
+from .runs.store import STATUSES, Run, Store, StatusError
+
+#: The tracker vocabulary, re-exported so an adapter gets its whole surface
+#: from this one module rather than reaching into ``runs.store``.
+RUN_STATUSES: tuple[str, ...] = STATUSES
 
 #: Codes an adapter has to handle. ``not_implemented`` is the Phase 5 stub.
 ERROR_CODES: tuple[str, ...] = (
@@ -315,6 +319,10 @@ class OverridesPatch(_Model):
     skills_pin: list[str] | None = None
     skills_exclude: list[str] | None = None
     bullet_text: dict[str, str] | None = None
+    #: requirement id → the weight this application gives it. A reweight is a
+    #: statement about *this* posting ("they say Kubernetes twice, believe
+    #: them"), which is why it lives beside the pins and not in the index.
+    requirement_reweight: dict[str, float] | None = None
     summary: str | None = None
     budget_lines: int | None = None
 
@@ -342,6 +350,15 @@ class OverridesPatch(_Model):
                 if updated.bullet_text.get(bullet_id) != text:
                     updated.bullet_text[str(bullet_id)] = str(text)
                     changes.append(f"~bullet_text: {bullet_id}")
+        if self.requirement_reweight is not None:
+            for requirement_id, weight in self.requirement_reweight.items():
+                requirement_id = str(requirement_id).strip()
+                if not requirement_id:
+                    continue
+                weight = float(weight)
+                if updated.requirements.reweight.get(requirement_id) != weight:
+                    updated.requirements.reweight[requirement_id] = weight
+                    changes.append(f"~weight: {requirement_id} = {weight:g}")
         if self.summary is not None and updated.summary != self.summary:
             updated.summary = self.summary
             changes.append("~summary")
@@ -349,6 +366,53 @@ class OverridesPatch(_Model):
             updated.budget_lines = int(self.budget_lines)
             changes.append(f"~budget_lines: {self.budget_lines}")
         return updated, changes
+
+
+class OverridesInfo(_Model):
+    """A run's ``overrides.yaml`` after an edit that did not re-run anything.
+
+    The TUI pins and excludes one item at a time and re-runs once, so writing
+    the file has to be separable from acting on it. ``changes`` is what this
+    edit did; ``summary`` is what the file now says altogether.
+    """
+
+    run_id: str
+    path: str
+    changes: list[str] = Field(default_factory=list)
+    summary: str = ""
+    overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class ItemUsage(_Model):
+    """What one role or project did in one recorded run.
+
+    ``rank`` is the position of its first selected bullet in the greedy trace —
+    1 means the solver reached for this item before anything else. ``None``
+    means the run did not select it at all, which is the answer an editor
+    actually wants: an item nothing ever picks is an item to rewrite.
+    """
+
+    run_id: str
+    created_at: str
+    company: str | None = None
+    role: str | None = None
+    status: str = ""
+    selected: bool = False
+    rank: int | None = None
+    bullets: list[str] = Field(default_factory=list)
+    gain: float | None = None
+
+
+class EvalBaseline(_Model):
+    """One ``eval/<config_hash>.json`` on disk, without loading its runs."""
+
+    path: str
+    config_hash: str = ""
+    created_at: str = ""
+    engine: str = ""
+    provider: str = ""
+    runs: int = 0
+    means: dict[str, Any] = Field(default_factory=dict)
 
 
 # ── Sanitising a pasted posting ──────────────────────────────────────────────
@@ -628,7 +692,11 @@ class Service:
                     ("eval", self.eval_dir), ("data", self.data_dir),
                 )
             },
-            "tools": {name: _which(name) for name in ("latexmk", "pdftotext", "pdfinfo")},
+            "tools": {
+                name: _which(name)
+                for name in ("latexmk", "tectonic", "pdftotext", "pdfinfo")
+            },
+            "latex_engine": _latex_engine(),
         }
         try:
             index = self.index
@@ -1112,7 +1180,7 @@ class Service:
                                out_dir, options)
         except (ValueError, OSError) as exc:
             raise ServiceError("conflict", f"the run failed: {exc}") from exc
-        for name, gate in _profile_gates(result.gates):
+        for name, gate in gate_flags(result.gates):
             warnings.append(f"gate {name}: {gate}")
 
         check_payload = None
@@ -1204,13 +1272,61 @@ class Service:
         """Edit a run's ``overrides.yaml`` and re-run it into the same directory."""
         if patch is None or patch.empty():
             raise ServiceError("invalid_input", "the override patch says nothing")
+        return self._rerun(run_id_or_out_dir, patch)
+
+    def rerun(self, run_id_or_out_dir: str) -> RunSummary:
+        """Run again into the same directory, honouring ``overrides.yaml`` as it is.
+
+        The half of :meth:`override` that a front-end which edits the file one
+        pin at a time needs: by the time the user presses "re-run" the patch has
+        already been written, and a method that insists on being handed one
+        again would either re-apply it or refuse.
+        """
+        return self._rerun(run_id_or_out_dir, None)
+
+    def set_overrides(
+        self, run_id_or_out_dir: str, patch: OverridesPatch
+    ) -> OverridesInfo:
+        """Write a patch into a run's ``overrides.yaml`` without re-running it.
+
+        Pinning an item is cheap; acting on the pin is a minute of solver and
+        LaTeX. Separating them is what lets a person pin four things and pay
+        once — and it means the file on disk is always what the screen shows,
+        even if the re-run never happens.
+        """
+        if patch is None or patch.empty():
+            raise ServiceError("invalid_input", "the override patch says nothing")
         run = self._run_row(run_id_or_out_dir)
+        out_dir = self._out_dir_of(run)
+        applied, changes = self._overrides_for(out_dir, patch)
+        return OverridesInfo(
+            run_id=run.id,
+            path=self.rel(overrides_path(out_dir)),
+            changes=changes,
+            summary=applied.summary_line(),
+            overrides=applied.model_dump(mode="json"),
+        )
+
+    def get_overrides(self, run_id_or_out_dir: str) -> OverridesInfo:
+        """A run's ``overrides.yaml`` as it stands, without changing anything."""
+        run = self._run_row(run_id_or_out_dir)
+        out_dir = self._out_dir_of(run)
+        applied, _changes = self._overrides_for(out_dir, None)
+        return OverridesInfo(
+            run_id=run.id,
+            path=self.rel(overrides_path(out_dir)),
+            summary=applied.summary_line(),
+            overrides=applied.model_dump(mode="json"),
+        )
+
+    def _rerun(self, reference: str, patch: OverridesPatch | None) -> RunSummary:
+        run = self._run_row(reference)
         if not run.out_dir:
             raise ServiceError("conflict", f"{run.id} has no recorded output directory")
         out_dir = self.locate(run.out_dir)
         text, jd_path, slug = self._posting_of(run)
         applied, changes = self._overrides_for(out_dir, patch)
-        if not changes:
+        if patch is not None and not changes:
             changes = ["overrides unchanged (the patch was already applied)"]
         return self._run(
             slug, text, jd_path, run.company, run.role, out_dir, applied,
@@ -1250,8 +1366,9 @@ class Service:
         tex_path = out_dir / "resume.tex"
         if not tex_path.is_file():
             raise ServiceError("not_found", f"no resume.tex in {self.rel(out_dir)}")
-        if not _which("latexmk"):
-            raise ServiceError("compile_failed", "latexmk is not on PATH")
+        engine = _latex_engine()
+        if not _which(engine):
+            raise ServiceError("compile_failed", f"{engine} is not on PATH")
         try:
             compiled = compile_pdf(tex_path, _pdf_name(self.profile, run.company or ""))
         except (CompileError, OSError) as exc:
@@ -1273,6 +1390,41 @@ class Service:
         if not run.out_dir:
             raise ServiceError("conflict", f"{run.id} has no recorded output directory")
         return self.locate(run.out_dir)
+
+    def run_pdf(self, run_id: str) -> str:
+        """The compiled PDF for a run, repo-relative. Never compiles anything.
+
+        The named copy (``First_Last_Resume_Company.pdf``) is preferred over
+        ``resume.pdf``: it is the file that gets uploaded, so it is the one a
+        person means when they say "open it".
+        """
+        run = self._run_row(run_id)
+        out_dir = self._out_dir_of(run)
+        for name in (_pdf_name(self.profile, run.company or ""), "resume.pdf"):
+            candidate = out_dir / name
+            if candidate.is_file():
+                return self.rel(candidate)
+        raise ServiceError(
+            "not_found",
+            f"{run.id} has no compiled PDF in {self.rel(out_dir)}; compile it first",
+        )
+
+    def run_text(self, run_id: str) -> str:
+        """What an ATS reads: ``pdftotext -layout`` over the run's PDF.
+
+        The preview a person judges the resume by has to be the extracted text
+        and not the LaTeX source, because every failure this project exists to
+        catch happens between the two.
+        """
+        from .ats.check import extract_text
+
+        pdf_path = self.locate(self.run_pdf(run_id))
+        if not _which("pdftotext"):
+            raise ServiceError("compile_failed", "pdftotext (poppler) is not on PATH")
+        try:
+            return extract_text(pdf_path)
+        except (RuntimeError, OSError) as exc:
+            raise ServiceError("compile_failed", str(exc)) from exc
 
     def check(self, run_id: str, labels: str | None = None) -> CheckReport:
         """Compile (if needed) and run the ATS parse + keyword checks on a run."""
@@ -1317,8 +1469,9 @@ class Service:
         tex_path = out_dir / "resume.tex"
         if not tex_path.is_file():
             raise ServiceError("not_found", f"no resume.tex in {self.rel(out_dir)}")
-        if not _which("latexmk"):
-            raise ServiceError("compile_failed", "latexmk is not on PATH")
+        engine = _latex_engine()
+        if not _which(engine):
+            raise ServiceError("compile_failed", f"{engine} is not on PATH")
         if not _which("pdftotext"):
             raise ServiceError("compile_failed", "pdftotext (poppler) is not on PATH")
         try:
@@ -1436,7 +1589,19 @@ class Service:
         )
 
     # ── Tracker ──────────────────────────────────────────────────────────────
-    def runs(self, status: str | None = None, company: str | None = None) -> list[RunRecord]:
+    def runs(
+        self,
+        status: str | None = None,
+        company: str | None = None,
+        *,
+        full: bool = False,
+    ) -> list[RunRecord]:
+        """Recorded runs, newest first.
+
+        ``full`` returns each run's whole payload instead of the three fields a
+        listing shows. A tracker table that wants keyword coverage as well as
+        the page count would otherwise have to call :meth:`get_run` per row.
+        """
         try:
             rows = self.store.list_runs(status=status, company=company)
         except StatusError as exc:
@@ -1448,7 +1613,7 @@ class Service:
                 config_hash=run.config_hash,
                 out_dir=self.rel(run.out_dir) if run.out_dir else None,
                 status=run.status, final=run.final, pdf_sha256=run.pdf_sha256,
-                data={
+                data=dict(run.data) if full else {
                     "pages": run.data.get("pages"),
                     "coverage": run.coverage.get("must_coverage"),
                     "gates": run.data.get("gates"),
@@ -1456,6 +1621,46 @@ class Service:
             )
             for run in rows
         ]
+
+    def item_usage(self, item_id: str) -> list[ItemUsage]:
+        """Where one role or project ranked in every run that could have used it.
+
+        The question an index editor is really asking — "what does changing
+        this bullet affect?" — has an answer only the run records hold. Runs
+        that predate the item, or that were made against a different index, are
+        reported as not selected rather than skipped: "the solver has never
+        picked this" is the finding.
+        """
+        item_id = _validate_id(item_id, "item id")
+        owner = {
+            bullet.id: item.id
+            for _section, item in _visible(self.index)
+            for bullet in item.bullets
+        }
+        usage: list[ItemUsage] = []
+        for run in self.store.list_runs():
+            selection = (run.data or {}).get("selection") or {}
+            claims = [str(claim) for claim in selection.get("claims") or []]
+            mine = [claim for claim in claims if owner.get(claim) == item_id]
+            groups = selection.get("groups") or {}
+            in_groups = any(
+                item_id in [str(value) for value in (ids or [])]
+                for ids in groups.values()
+            )
+            gains = {
+                str(step.get("claim_id")): float(step.get("gain") or 0.0)
+                for step in selection.get("trace") or []
+            }
+            rank = min((claims.index(claim) for claim in mine), default=None)
+            usage.append(ItemUsage(
+                run_id=run.id, created_at=run.created_at, company=run.company,
+                role=run.role, status=run.status,
+                selected=bool(mine or in_groups),
+                rank=rank + 1 if rank is not None else None,
+                bullets=mine,
+                gain=max((gains.get(claim, 0.0) for claim in mine), default=None),
+            ))
+        return usage
 
     def set_status(self, run_id: str, status: str, note: str | None = None) -> RunRecord:
         run = self._run_row(run_id)
@@ -1762,6 +1967,66 @@ class Service:
             skipped=list(payload.get("skipped") or []),
         )
 
+    def eval_baselines(self) -> list[EvalBaseline]:
+        """Every ``eval/*.json`` on disk, newest first, without its per-run rows."""
+        if not self.eval_dir.is_dir():
+            return []
+        found: list[tuple[float, EvalBaseline]] = []
+        for path in self.eval_dir.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or "means" not in payload:
+                continue
+            options = payload.get("options") or {}
+            found.append((path.stat().st_mtime, EvalBaseline(
+                path=self.rel(path),
+                config_hash=str(payload.get("config_hash") or ""),
+                created_at=str(payload.get("generated") or ""),
+                engine=str(options.get("engine") or ""),
+                provider=str(options.get("provider") or ""),
+                runs=len(payload.get("runs") or []),
+                means=dict(payload.get("means") or {}),
+            )))
+        return [baseline for _mtime, baseline in
+                sorted(found, key=lambda pair: -pair[0])]
+
+    def eval_report(self, path: str | Path) -> EvalSummary:
+        """The rendered table for one baseline file already on disk."""
+        from .evaluation.evaluate import render_table
+
+        resolved = self.locate(path)
+        if not resolved.is_file():
+            raise ServiceError("not_found", f"no eval result at {self.rel(resolved)}")
+        try:
+            payload = json.loads(resolved.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ServiceError("validation_failed", f"{self.rel(resolved)}: {exc}") from exc
+        return EvalSummary(
+            path=self.rel(resolved),
+            config_hash=str(payload.get("config_hash") or ""),
+            table=render_table(payload),
+            means=dict(payload.get("means") or {}),
+            runs=len(payload.get("runs") or []),
+            skipped=list(payload.get("skipped") or []),
+        )
+
+    def eval_compare(self, left: str | Path, right: str | Path) -> str:
+        """The per-metric delta table between two baselines (``eval --compare``)."""
+        from .evaluation.evaluate import compare
+
+        paths = []
+        for given in (left, right):
+            resolved = self.locate(given)
+            if not resolved.is_file():
+                raise ServiceError("not_found", f"no eval result at {self.rel(resolved)}")
+            paths.append(resolved)
+        try:
+            return compare(*paths)
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise ServiceError("validation_failed", str(exc)) from exc
+
     def labels_from_run(self, run_id: str) -> LabelUpdate:
         """Promote a run's pins and exclusions into its label file."""
         from .evaluation.labels import merge_overrides, slug as label_slug
@@ -1806,6 +2071,21 @@ def _which(name: str) -> bool:
     return bool(shutil.which(name))
 
 
+def _latex_engine() -> str:
+    """The typesetter a compile would use here — ``latexmk`` or ``tectonic``.
+
+    Read at call time rather than at import, because the container sets
+    ``ATS_LATEX_ENGINE`` and a long-lived service must not have cached the
+    answer from before.
+    """
+    from .ats.check import resolve_latex_engine
+
+    try:
+        return resolve_latex_engine()
+    except ValueError as exc:
+        raise ServiceError("invalid_input", str(exc)) from exc
+
+
 def _pdf_name(profile: Mapping[str, Any], company: str) -> str:
     from .ats.check import output_filename
 
@@ -1823,8 +2103,12 @@ def _gates_json(profile: JDProfile) -> dict[str, Any]:
     return gate_dict(profile.gates)
 
 
-def _profile_gates(gates: Mapping[str, Any]) -> list[tuple[str, str]]:
-    """``(name, one-line reason)`` for every gate that says something."""
+def gate_flags(gates: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """``(name, one-line reason)`` for every gate that says something.
+
+    Takes the JSON shape a run record and :class:`FitReport` carry, so a
+    front-end can read a stored payload without importing the gate models.
+    """
     blocking: list[tuple[str, str]] = []
     for name, gate in (gates or {}).items():
         if not isinstance(gate, Mapping):

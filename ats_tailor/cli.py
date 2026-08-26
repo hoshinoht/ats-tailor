@@ -16,11 +16,14 @@ Subcommands:
 - ``fit``      — cheap triage of a posting against the index, before a run
 - ``review-pack`` — one run's posting, choices and coverage, for a reviewer
 - ``mcp``      — serve this repository to an agent runtime over stdio
+- ``tui``      — the Textual front-end in this terminal
+- ``serve``    — the same Textual app in a browser (``textual-serve``)
 """
 
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 
@@ -44,6 +47,8 @@ commands:
   fit       triage a posting against the index without running the pipeline
   review-pack  one run's posting, selected claims and coverage, in one payload
   mcp       serve this repository to an agent runtime over stdio (MCP)
+  tui       the Textual front-end (needs the `tui` extra)
+  serve     the same Textual app in a browser, over HTTP
 """
 
 
@@ -959,6 +964,78 @@ def _cmd_eval(argv: list[str]) -> int:
     return 0
 
 
+
+
+def _cmd_tui(argv: list[str]) -> int:
+    """The Textual front-end. Every screen is a client of ``Service``."""
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor tui",
+        description="Browse applications, tailor one run, edit the index and "
+                    "read the eval baselines, in this terminal.")
+    parser.add_argument("--repo", default=".",
+                        help="repository root holding index/, jd/, output/ (default: .)")
+    parser.add_argument("--index", default=None,
+                        help="index directory (default: <repo>/index)")
+    parser.add_argument("--data-dir", default=None,
+                        help="runtime store directory (default: <repo>/data)")
+    parser.add_argument("--provider", default=None, choices=list(config.PROVIDERS),
+                        help="who reads a posting when a screen does not say")
+    args = parser.parse_args(argv)
+
+    from .tui import run
+
+    return run(args.repo, index_dir=args.index, data_dir=args.data_dir,
+               provider=args.provider)
+
+
+def _cmd_serve(argv: list[str]) -> int:
+    """The same app in a browser. One process per connected client.
+
+    ``textual-serve`` runs the app as a *subprocess* per session, so what is
+    passed here is a command line rather than an object — which is why the repo
+    and the provider have to be spelled back out below.
+    """
+    parser = argparse.ArgumentParser(
+        prog="ats-tailor serve",
+        description="Serve the Textual app over HTTP (textual-serve). "
+                    "Anyone who can reach the port can edit this repository — "
+                    "bind it to localhost unless you mean otherwise.")
+    parser.add_argument("--repo", default=".",
+                        help="repository root holding index/, jd/, output/ (default: .)")
+    parser.add_argument("--index", default=None, help="index directory")
+    parser.add_argument("--data-dir", default=None, help="runtime store directory")
+    parser.add_argument("--provider", default=None, choices=list(config.PROVIDERS))
+    parser.add_argument("--host", default="localhost",
+                        help="interface to bind (default: localhost; the container "
+                             "image defaults to 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8000, help="default: 8000")
+    parser.add_argument("--public-url", default=None,
+                        help="URL the browser should use, when behind a proxy")
+    args = parser.parse_args(argv)
+
+    try:
+        from textual_serve.server import Server
+    except ImportError as exc:
+        from .tui import MISSING
+
+        print(f"error: {MISSING}\n({exc})", file=sys.stderr)
+        return 1
+
+    command = [sys.executable, "-m", "ats_tailor.cli", "tui",
+               "--repo", str(Path(args.repo).expanduser().resolve())]
+    for flag, value in (("--index", args.index), ("--data-dir", args.data_dir),
+                        ("--provider", args.provider)):
+        if value:
+            command += [flag, str(value)]
+    server = Server(
+        " ".join(shlex.quote(part) for part in command),
+        host=args.host, port=args.port, title="ats-tailor",
+        public_url=args.public_url,
+    )
+    server.serve()
+    return 0
+
+
 COMMANDS = {
     "tailor": _cmd_tailor,
     "fit": _cmd_fit,
@@ -974,6 +1051,8 @@ COMMANDS = {
     "labels": _cmd_labels,
     "eval": _cmd_eval,
     "jd": _cmd_jd,
+    "tui": _cmd_tui,
+    "serve": _cmd_serve,
 }
 
 

@@ -330,13 +330,25 @@ Providers: `ollama`, `lmstudio`, `mlx`, `none` (deterministic fallbacks),
 the driving agent is the LLM). No step in the pipeline calls a model
 directly.
 
-**TUI (Textual).** Screens: Applications (runs + status), Tailor (three
-panes: requirements coloured by coverage · candidates/bullets with keyboard
-pin/exclude/reorder · preview = `pdftotext -layout` text, i.e. what an ATS
-sees; `o` opens the PDF; inline raster via `textual-image` where the
-terminal supports it), Index (tree + form, live validation, round-trip
-save), Eval (table + compare). `textual serve` exposes the same app in a
-browser — no separate web front-end.
+**TUI (Textual).** *Delivered in 4b (`ats_tailor/tui/`).* Screens, reachable
+with `1`–`4`: Applications (runs + status + coverage + days quiet, `⚠` when
+the posting's gates flagged something), Tailor (three panes: requirements
+coloured by coverage · `pdftotext -layout` preview, i.e. what an ATS sees ·
+the selected items and bullets with the gain each bought; `p`/`x` and
+`P`/`X` pin and exclude, `w` reweights, `r` re-runs, `c` compiles and
+checks, `o` opens the PDF, `i` rasters page 1 via `textual-image` where the
+terminal supports it, `l` promotes the pins into the label), Index (tree +
+form, whole-index validation on `ctrl+s`, round-trip save, and an impact
+panel giving the item's rank across every recorded run), Eval (baselines +
+`e` run, `d` compare). `ats-tailor serve` runs the same app over HTTP with
+`textual-serve` — no separate web front-end.
+
+Two properties are load-bearing rather than cosmetic. Every service call
+goes through one `run_task` on a Textual thread worker with a busy
+indicator, so nothing blocks the event loop; and the app holds a single lock
+around those calls, for the same reason the MCP does — this build of SQLite
+is in multi-thread mode, so the store's connection may move between threads
+but never be used by two at once.
 
 **MCP (OpenCode/Claude Code compatible).** *Delivered in 4a
 (`ats_tailor/mcp/`).* Same conventions as
@@ -383,12 +395,23 @@ Config:
 A Go client MCP over the HTTP adapter can be added later if a static
 binary is wanted; nothing else changes.
 
-**Container.** Python image with Tectonic and poppler-utils; `docker
-compose run --rm -it app ats-tailor tui` for the TUI, `ats-tailor serve`
-(textual serve) as the exposed port; mounts `index/`, `jd/`, `output/`,
-`labels/`, `data/`, HF and Tectonic caches; `ATS_LLM_BACKEND=ollama`,
-`ATS_OLLAMA_URL=http://host.docker.internal:11434`. LLM stays on the host
-(no GPU in Docker on macOS). MLX is not used in the container.
+**Container.** *Delivered in 4b.* `python:3.12-slim` with the Tectonic
+static binary and poppler-utils — no TeX Live, which is the difference
+between a few hundred megabytes and a few thousand; `uv` from the official
+image; `uv sync --no-dev --extra tui`; non-root; `ENTRYPOINT ["ats-tailor"]`
+with `CMD serve --host 0.0.0.0 --port 8080`. `docker compose run --rm -it
+app tui` for the TUI, `docker compose up` for the browser. Mounts `index/`,
+`jd/`, `labels/`, `output/`, `eval/`, `data/` and `profile.yaml` from
+`REPO` (default `..`), plus named volumes for the HF and Tectonic caches.
+`ATS_LLM_PROVIDER=ollama`, `ATS_OLLAMA_URL=http://host.docker.internal:11434`:
+the LLM stays on the host, because there is no GPU in Docker on macOS. MLX
+is not available in the container at all.
+
+`ats_tailor.ats.check.compile_pdf` gains `ATS_LATEX_ENGINE=auto|latexmk|
+tectonic` (`auto` = latexmk if on PATH, else Tectonic). Everything after the
+compile reads the PDF's text layer, so the parse and keyword checks are
+engine-agnostic — which is the point: the container has to measure what the
+laptop measures.
 
 ## 8. Phases
 
@@ -400,7 +423,7 @@ compose run --rm -it app ats-tailor tui` for the TUI, `ats-tailor serve`
 | 3b | **Delivered.** SQLite runtime store (`entities`, `embeddings`, `jd_profiles`, `runs`, `run_notes`), `sync`, per-run `overrides.yaml` honoured by selection (pins/excludes/edited text/requirement edits), run records and the tracker, `labels from-run` | 3a |
 | 3c | **Delivered.** LLM provider interface (`ollama|lmstudio|mlx|none|external`), requirement extraction + gates, alias-aligned surface forms in rendering, summary variants + target title, v2 becomes the default engine | 3b |
 | 4a | **Delivered.** `service.py` (the one in-process API), stdio MCP server (19 tools by default, 20 with `--allow-eval`), `fit` / `jd add` / `review-pack` CLI commands, `AGENTS.md` | 3 |
-| 4b | Textual TUI, `textual serve`, Dockerfile/Compose | 4a |
+| 4b | **Delivered.** Textual TUI (4 screens), `serve`, `ATS_LATEX_ENGINE`, Dockerfile/Compose | 4a |
 | 5 | Variant proposals + summary polish with metric guardrail (agent via MCP or local model), approval in TUI | 4 |
 
 ### 3a result (2026-08-26)
@@ -704,3 +727,94 @@ Deviations from `docs/plans/phase-4a.md`, all deliberate:
   an agent that can see it will eventually spend it answering a question one
   `ats_fit` would have answered. Absent beats present-and-refusing: a tool
   that is not in `list_tools` is not a tool anybody has to reason about.
+
+### 4b result (2026-08-26)
+
+`ats_tailor/tui/` (four screens over `Service`, ~2,100 lines plus a
+215-line stylesheet), `ats-tailor
+tui | serve`, `ATS_LATEX_ENGINE`, a `Dockerfile` and a `docker-compose.yaml`.
+45 new tests; the suite is 369 passing with `ATS_SMOKE=1`.
+
+The pipeline is untouched. Re-running the sweep against the real index with
+`--engine v2 --provider none` reproduces `eval/30a5cd1d5a71.json` metric for
+metric — must 75%, nice 34%, context 51%, parse 100%, 1.00 pages, 0
+exclusion violations, every delta `+0.000`. The config *hash* moves
+(`3e00250f3069`), because `code_hash` covers every `.py` in the package and
+`tui/` is new; that is the fingerprint working as designed, not drift.
+
+Six things had to be decided rather than assumed:
+
+- **Choosing and paying are separate keystrokes.** `p`/`x`/`P`/`X`/`w` write
+  `overrides.yaml` immediately through a new `Service.set_overrides`, and `r`
+  (`Service.rerun`) is what spends the minute. `Service.override` refuses an
+  empty patch — correctly, for an agent — so a front-end that edits the file
+  one pin at a time needed the two halves apart. The payoff is that the file
+  on disk always matches the screen, even when the re-run never happens.
+- **The TUI holds the same lock the MCP does.** Textual runs every worker on
+  its own thread and this build of SQLite is in multi-thread mode: two
+  concurrent service calls segfaulted the process within a minute of the first
+  pilot test. One lock around every call fixes it, serialises the store, and
+  incidentally stops two re-runs racing into one output directory. A long eval
+  sweep therefore blocks the other screens, which is honest: it is one
+  repository and one store.
+- **A tab has to hand focus to its screen.** Every single-letter key is a
+  binding on the screen's container, and Textual only reaches a binding from a
+  widget inside it. Left alone, `TabbedContent` focuses the tab bar and `s`,
+  `p` and `e` do nothing at all — silently. Each tab now focuses its primary
+  widget on activation.
+- **`ctrl+p` was already taken.** Textual binds it to the command palette. The
+  palette is off (`ENABLE_COMMAND_PALETTE = False`): a provider picker is the
+  thing this app has that a generic palette does not.
+- **The impact panel needed a new question of the store.**
+  `Service.item_usage(item_id)` reports, for every recorded run, whether the
+  item was selected and where its first bullet came in the greedy trace. An
+  item no run has ever picked reports `rank: None` rather than being omitted —
+  "the solver has never reached for this" is the finding an editor wants, and
+  nothing else in the repository says it.
+- **Bullets edit as `id :: text`.** `index_put` merges bullets by id, so the id
+  has to survive the round trip through a TextArea. Showing it also makes the
+  refusal legible: a line without one is rejected with its line number, rather
+  than reaching the schema as a bullet with no `kind`.
+
+Container: **1.33 GB**, `python:3.12-slim` + Tectonic 0.17.0 + poppler.
+Cold run (model and LaTeX bundle downloading into the volumes) 3m37s; warm
+run with `HF_HUB_OFFLINE=1` **8.0s**, 1 page, `check` 14/14 parse checks,
+must 100%. `docker compose up` serves the TUI on :8080 (verified over the
+websocket: the app boots and paints inside the container).
+
+The naive image was **10.7 GB**. `sentence-transformers` pulls PyPI's torch,
+which on Linux is the CUDA build — on aarch64 too, since NVIDIA publishes
+those wheels now — and uv's download cache kept every wheel in the layer.
+Reinstalling the *same* torch version from PyTorch's CPU index, dropping the
+`nvidia-*`/`cuda-*` distributions and running `uv cache clean` in the same
+layer is 8× smaller for an image that will never see a GPU: on macOS there is
+none to see, which is why the provider talks to an Ollama on the host.
+
+Deviations from `docs/plans/phase-4b.md`, all deliberate:
+
+- **`textual-serve`, not `textual serve`.** The `textual` CLI is `textual-dev`
+  and its `serve` subcommand is the `textual-serve` package; `ats-tailor serve`
+  uses that package's `Server` API directly, which is one dependency rather
+  than two and needs no shell quoting of a nested command line.
+- **`ATS_LATEX_ENGINE` reaches four call sites, not one.** The plan puts it in
+  `compile_pdf`. A guard that still asks `which("latexmk")` would refuse to
+  compile in an image that has Tectonic, so `Service.compile`, the silent
+  check, and `pipeline._page_count` all resolve the engine instead. On a
+  machine with latexmk every one of them resolves to latexmk, which is why the
+  baseline reproduces exactly.
+- **`healthcheck` reports `tectonic` and the resolved engine.** One more key in
+  `tools` and a `latex_engine` field. `ats_healthcheck` is how an agent finds
+  out it cannot compile, and "latexmk is missing" is the wrong answer in a
+  container where nothing is missing.
+- **The right pane hides below 90 columns; it does not reflow.** Two panes at
+  45 columns read and three at 30 do not. The keys still work on whatever has
+  focus, so the screen is narrower rather than less capable.
+- **The Index tree covers the four kinds the plan lists.** Summaries and
+  education are addressable through `index_get`/`index_put` but have no form:
+  they are one-of-a-kind entities with no bullets and no impact to show.
+- **`profile.yaml` is mounted too.** The plan lists six directories; the engine
+  cannot render a resume without a name and contact details.
+- **`i` needs `pdftoppm` as well as a capable terminal.** `textual-image` draws
+  an image; something has to rasterise the PDF first. Both absences degrade to
+  a message naming the PNG on disk.
+

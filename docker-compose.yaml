@@ -1,0 +1,68 @@
+# The engine in a container, the repository on the host.
+#
+# Run it from the parent repository:
+#
+#   docker compose -f ats-tailor/docker-compose.yaml build
+#   docker compose -f ats-tailor/docker-compose.yaml run --rm -it app tui
+#   docker compose -f ats-tailor/docker-compose.yaml up          # browser UI on :8080
+#   docker compose -f ats-tailor/docker-compose.yaml run --rm app tailor jd/x.txt Acme SRE
+#
+# REPO is where the index, postings and runs live, relative to *this file*.
+# It defaults to `..`, which is the resume repository this engine is a
+# submodule of; point it somewhere else to drive another repository with the
+# same image.
+#
+# The LLM stays on the host: there is no GPU inside Docker on macOS, so the
+# provider talks to an Ollama running natively via host.docker.internal.
+
+name: ats-tailor
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ats-tailor:local
+    # `textual-serve` writes its own address into the page it serves, and the
+    # address it binds to (0.0.0.0) is not one a browser can fetch assets from.
+    # --public-url is the URL the browser should use.
+    command:
+      - serve
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8080"
+      - --public-url
+      - "${ATS_PUBLIC_URL:-http://localhost:8080}"
+    # On Docker Desktop a bind mount is writable whatever uid the container
+    # runs as. On Linux it is not: set ATS_UID/ATS_GID to your own so `output/`
+    # and `data/` do not fill up with root-owned files.
+    user: "${ATS_UID:-10001}:${ATS_GID:-10001}"
+    environment:
+      ATS_LLM_PROVIDER: "${ATS_LLM_PROVIDER:-ollama}"
+      ATS_OLLAMA_URL: "${ATS_OLLAMA_URL:-http://host.docker.internal:11434}"
+      # No TeX Live in the image; `auto` would resolve to this anyway, but a
+      # container is not the place to leave a typesetter to chance.
+      ATS_LATEX_ENGINE: tectonic
+      # Set to 1 once the embedding model is in the volume to run with no
+      # network at all — see the README.
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
+    volumes:
+      - ${REPO:-..}/index:/repo/index
+      - ${REPO:-..}/jd:/repo/jd
+      - ${REPO:-..}/labels:/repo/labels
+      - ${REPO:-..}/output:/repo/output
+      - ${REPO:-..}/eval:/repo/eval
+      - ${REPO:-..}/data:/repo/data
+      # The engine needs a name and contact details to render a resume.
+      - ${REPO:-..}/profile.yaml:/repo/profile.yaml:ro
+      - hf-cache:/cache/hf
+      - tectonic-cache:/cache/tectonic
+    ports:
+      - "${ATS_PORT:-8080}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  hf-cache:
+  tectonic-cache:

@@ -163,6 +163,14 @@ HEADER_CLAIMS = _bool("ATS_HEADER_CLAIMS", False)
 PIN_SKILL_GROUPS = _str("ATS_PIN_SKILL_GROUPS", "Programming Languages")
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or None
 
+#: Which typesetter compiles a rendered resume: auto | latexmk | tectonic.
+#: `auto` prefers latexmk when it is on PATH and falls back to Tectonic, which
+#: is what the container ships instead of a TeX Live install. The parse and
+#: keyword checks read the PDF, so they are engine-agnostic either way.
+#: `ats_tailor.ats.check.resolve_latex_engine` re-reads the environment at call
+#: time, so this constant is the documented default, not a cached decision.
+LATEX_ENGINE = _str("ATS_LATEX_ENGINE", "auto")
+
 # Runtime store (SQLite: embeddings, JD profiles, run records). Empty means
 # "beside the index directory" — see ats_tailor.runs.store.data_dir.
 DATA_DIR = _str("ATS_DATA_DIR", "")
@@ -195,6 +203,8 @@ def validate_config(ignore_parse_keys=None):
         errors.append("ATS_LLM_BACKEND must be one of: auto, mlx, lmstudio, ollama")
     if LLM_PROVIDER not in set(PROVIDERS):
         errors.append(f"ATS_LLM_PROVIDER must be one of: {', '.join(PROVIDERS)}")
+    if LATEX_ENGINE not in {"auto", "latexmk", "tectonic"}:
+        errors.append("ATS_LATEX_ENGINE must be one of: auto, latexmk, tectonic")
     if not str(PROMPT_VERSION).strip():
         errors.append("ATS_PROMPT_VERSION must not be empty")
     if LLM_PROBE_TIMEOUT <= 0:

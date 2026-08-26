@@ -13,7 +13,6 @@ the real thing: render, compile, count pages, shrink the budget, re-solve.
 from __future__ import annotations
 
 import json
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -32,7 +31,14 @@ from .adapt import (
     section_rules,
     skill_claims,
 )
-from ..ats.check import CompileError, compile_pdf, gap_terms, index_term_forms, output_filename
+from ..ats.check import (
+    CompileError,
+    compile_pdf,
+    gap_terms,
+    index_term_forms,
+    latex_available,
+    output_filename,
+)
 from .embedding import SentenceTransformerEmbedder, encode_store
 from ..index.io import to_legacy
 from ..jd.extract import extract_requirements, save_edited
@@ -412,7 +418,7 @@ def _cert_scores(embedder, jd_text: str, certs: Sequence[dict], store: Store) ->
 
 def _page_count(tex_path: Path, profile: dict, company: str, options: V2Options, say) -> int | None:
     """Compile and count pages, or ``None`` when there is no LaTeX to compile with."""
-    if not options.compile_page_check or not shutil.which("latexmk"):
+    if not options.compile_page_check or not latex_available():
         return None
     try:
         compiled = compile_pdf(
