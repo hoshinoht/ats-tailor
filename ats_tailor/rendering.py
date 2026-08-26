@@ -13,21 +13,38 @@ def latex_escape(text):
     """Escape special LaTeX characters."""
     if not isinstance(text, str):
         return text
-    replacements = [
-        ("\\", r"\textbackslash{}"),
-        ("&", r"\&"),
-        ("%", r"\%"),
-        ("$", r"\$"),
-        ("#", r"\#"),
-        ("_", r"\_"),
-        ("{", r"\{"),
-        ("}", r"\}"),
-        ("~", r"\textasciitilde{}"),
-        ("^", r"\textasciicircum{}"),
-    ]
-    for old, new in replacements:
-        text = text.replace(old, new)
-    return text
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(ch, ch) for ch in text)
+
+
+def latex_href_escape(text):
+    """Escape strings used inside LaTeX href targets."""
+    return latex_escape(text)
+
+
+def _dedupe_keep_order(items):
+    seen = set()
+    result = []
+    for item in items:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        key = item.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
 
 
 def build_project_context(proj):
@@ -37,12 +54,26 @@ def build_project_context(proj):
         tech_parts.extend(proj.get("tech_stack", {}).get(key, []))
     tech_line = ", ".join(tech_parts[:8])
 
-    bullets = proj.get("responsibilities", [])[:MAX_PROJECT_BULLETS]
-    # Pad with impact bullets if below minimum
+    responsibilities = proj.get("responsibilities", [])
+    impact = proj.get("impact", [])
+    if impact and MAX_PROJECT_BULLETS == 1:
+        bullets = impact[:1]
+    elif impact:
+        bullets = responsibilities[:max(MAX_PROJECT_BULLETS - 1, 0)] + impact[:1]
+    else:
+        bullets = responsibilities[:MAX_PROJECT_BULLETS]
+
+    # Fill any remaining budget, then pad to the configured minimum if possible.
+    bullets = _dedupe_keep_order(bullets)
+    for candidate in responsibilities + impact:
+        if len(bullets) >= MAX_PROJECT_BULLETS:
+            break
+        bullets = _dedupe_keep_order(bullets + [candidate])
     if len(bullets) < MIN_PROJECT_BULLETS:
-        impact = proj.get("impact", [])
-        needed = MIN_PROJECT_BULLETS - len(bullets)
-        bullets = bullets + impact[:needed]
+        for candidate in impact + responsibilities:
+            if len(bullets) >= MIN_PROJECT_BULLETS:
+                break
+            bullets = _dedupe_keep_order(bullets + [candidate])
 
     summary = proj.get("summary", proj["name"])
     seps = [" with ", " using ", " for ", " via ", " comparing ", " between "]
@@ -85,6 +116,7 @@ def render_resume(company, role, profile, education, experience, projects, skill
         comment_end_string="#))",
     )
     env.filters["latex_escape"] = latex_escape
+    env.filters["latex_href_escape"] = latex_href_escape
 
     template = env.get_template("template.tex.j2")
     return template.render(

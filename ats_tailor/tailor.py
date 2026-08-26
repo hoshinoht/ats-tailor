@@ -12,6 +12,7 @@ Usage:
 from sentence_transformers import SentenceTransformer
 import argparse
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from .scoring import (
 )
 from . import config
 from .config import (
-    EMBED_MODEL, HF_TOKEN, LLM_EXPAND, LLM_MODEL, MAX_PAGE_LINES,
+    CERT_THRESHOLD, EMBED_MODEL, HF_TOKEN, LLM_EXPAND, LLM_MODEL, MAX_PAGE_LINES,
     MIN_EXP_BULLETS, MIN_EXPERIENCE, MIN_PROJECT_BULLETS, MIN_PROJECTS,
     RERANK, SECTION_PRIORITY,
 )
@@ -50,6 +51,7 @@ from .reporting import (
     generate_visualization,
 )
 from .loaders import (
+    build_cache_key,
     _text_hash,
     _yaml_hash,
     load_cached_embeddings,
@@ -66,9 +68,23 @@ from .llm import (
 
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
+def _safe_slug(*parts):
+    """Build a path-safe slug from company/role names."""
+    raw = "-".join(str(p).strip().lower() for p in parts if str(p).strip())
+    slug = re.sub(r"[^a-z0-9._-]+", "-", raw)
+    slug = re.sub(r"-+", "-", slug).strip(".-_")
+    return slug or "resume"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Tailor a resume to a job description")
+    raw_args = sys.argv[1:]
+    ignore_config_parse_keys = set()
+    if any(a == "--no-llm" or a == "--llm" or a.startswith("--llm=") for a in raw_args):
+        ignore_config_parse_keys.add("ATS_LLM_EXPAND")
+    if any(a in {"--rerank", "--no-rerank"} for a in raw_args):
+        ignore_config_parse_keys.add("ATS_RERANK")
     parser.add_argument(
         "--jd", type=str, help="Path to job description text file")
     parser.add_argument("--company", required=False,
@@ -81,12 +97,14 @@ def main():
                         help="Path to YAML index directory (default: index/)")
     parser.add_argument("--profile", type=str, default=None,
                         help="Path to profile.yaml (default: profile.yaml next to index dir)")
-    parser.add_argument("--llm", nargs="?", const=LLM_MODEL,
-                        default=LLM_MODEL if LLM_EXPAND else None,
-                        help="Expand JD keywords via LLM (env: ATS_LLM_EXPAND + ATS_LLM_MODEL)")
+    llm_group = parser.add_mutually_exclusive_group()
+    llm_group.add_argument("--llm", nargs="?", const=LLM_MODEL, default=argparse.SUPPRESS,
+                           help="Expand JD keywords via LLM (env: ATS_LLM_EXPAND + ATS_LLM_MODEL)")
+    llm_group.add_argument("--no-llm", action="store_true",
+                           help="Disable LLM keyword expansion even if ATS_LLM_EXPAND is set")
     parser.add_argument("--model", type=str, default=EMBED_MODEL,
                         help=f"SentenceTransformer model name (env: ATS_EMBED_MODEL, default: {EMBED_MODEL})")
-    parser.add_argument("--rerank", action="store_true", default=RERANK,
+    parser.add_argument("--rerank", action=argparse.BooleanOptionalAction, default=RERANK,
                         help="Re-score top candidates with a cross-encoder (env: ATS_RERANK)")
     parser.add_argument("--llm-backend", choices=["auto", "mlx", "lmstudio", "ollama"],
                         default=config.LLM_BACKEND,
@@ -95,6 +113,16 @@ def main():
 
     # Wire CLI --llm-backend to config so llm.py picks it up
     config.LLM_BACKEND = args.llm_backend
+
+    if args.no_llm:
+        args.llm = None
+    elif not hasattr(args, "llm"):
+        args.llm = LLM_MODEL if LLM_EXPAND else None
+
+    try:
+        config.validate_config(ignore_parse_keys=ignore_config_parse_keys)
+    except ValueError as e:
+        parser.error(str(e))
 
     if not args.company or not args.role:
         parser.error("--company and --role are required")
@@ -122,7 +150,7 @@ def main():
     jd_lower = jd_text.lower()
 
     # ── Output dir ──
-    slug = f"{args.company}-{args.role}".lower().replace(" ", "-")
+    slug = _safe_slug(args.company, args.role)
     out_dir = Path(args.output) if args.output else Path("output") / slug
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -166,13 +194,16 @@ def main():
     # ── Load model & embed ──
     print(f"Loading embedding model ({args.model})...")
     model = SentenceTransformer(args.model, token=HF_TOKEN)
+    embed_dim = model.get_sentence_embedding_dimension()
 
     print("Embedding job description...")
     jd_chunks = chunk_text(jd_text)
     jd_weights = compute_jd_weights(jd_chunks)
     jd_cache_dir = out_dir
-    jd_cache_key = f"jd_{_text_hash(jd_text)[:16]}"
-    jd_embeddings = load_cached_embeddings(jd_cache_dir, jd_cache_key)
+    jd_cache_key = build_cache_key("jd", args.model, _text_hash(jd_text), "jdv2")
+    jd_embeddings = load_cached_embeddings(
+        jd_cache_dir, jd_cache_key, embed_dim, expected_ndim=2, expected_rows=len(jd_chunks)
+    )
     if jd_embeddings is None:
         jd_embeddings = model.encode(jd_chunks)
         save_cached_embeddings(jd_cache_dir, jd_cache_key, jd_embeddings)
@@ -184,9 +215,12 @@ def main():
     emb_cache_dir = index_dir / ".emb_cache"
 
     role_scores = []
+    role_components = []
     for r in roles:
-        cache_key = f"role_{r['id']}_{_yaml_hash(r)[:16]}_mv2"
-        cached = load_cached_embeddings(emb_cache_dir, cache_key)
+        cache_key = build_cache_key("role", args.model, _yaml_hash(r), "itemmv3")
+        cached = load_cached_embeddings(
+            emb_cache_dir, cache_key, embed_dim, expected_ndim=2, expected_min_rows=2
+        )
         if cached is not None:
             r_embeds = cached
         else:
@@ -196,12 +230,26 @@ def main():
         kw = compute_keyword_bonus(r.get("ats_tags", []), jd_lower, jd_text)
         tag = compute_tag_overlap_bonus(
             r.get("ats_tags", []), jd_lower, jd_text)
-        role_scores.append((sem + kw + tag) * recency_multiplier(r["period"]))
+        recency = recency_multiplier(r["period"])
+        total = (sem + kw + tag) * recency
+        role_scores.append(total)
+        role_components.append({
+            "semantic": sem,
+            "keyword": kw,
+            "tag": tag,
+            "recency": recency,
+            "evidence": 0.0,
+            "rerank": 0.0,
+            "total": total,
+        })
 
     proj_scores = []
+    proj_components = []
     for p in projects:
-        cache_key = f"proj_{p['id']}_{_yaml_hash(p)[:16]}_mv2"
-        cached = load_cached_embeddings(emb_cache_dir, cache_key)
+        cache_key = build_cache_key("proj", args.model, _yaml_hash(p), "itemmv3")
+        cached = load_cached_embeddings(
+            emb_cache_dir, cache_key, embed_dim, expected_ndim=2, expected_min_rows=2
+        )
         if cached is not None:
             p_embeds = cached
         else:
@@ -211,12 +259,24 @@ def main():
         kw = compute_keyword_bonus(p.get("ats_tags", []), jd_lower, jd_text)
         tag = compute_tag_overlap_bonus(
             p.get("ats_tags", []), jd_lower, jd_text)
-        proj_scores.append((sem + kw + tag) * recency_multiplier(p["period"]))
+        recency = recency_multiplier(p["period"])
+        total = (sem + kw + tag) * recency
+        proj_scores.append(total)
+        proj_components.append({
+            "semantic": sem,
+            "keyword": kw,
+            "tag": tag,
+            "recency": recency,
+            "evidence": 0.0,
+            "rerank": 0.0,
+            "total": total,
+        })
 
     cert_scores = []
+    cert_components = []
     for c in certs:
-        cache_key = f"cert_{c['id']}_{_yaml_hash(c)[:16]}"
-        cached = load_cached_embeddings(emb_cache_dir, cache_key)
+        cache_key = build_cache_key("cert", args.model, _yaml_hash(c), "certv2")
+        cached = load_cached_embeddings(emb_cache_dir, cache_key, embed_dim, expected_ndim=1)
         if cached is not None:
             c_emb = cached
         else:
@@ -225,7 +285,17 @@ def main():
         sem = score_against_jd(jd_embeddings, c_emb)
         kw = compute_keyword_bonus(
             c.get("ats_keywords", []), jd_lower, jd_text)
-        cert_scores.append(sem + kw)
+        total = sem + kw
+        cert_scores.append(total)
+        cert_components.append({
+            "semantic": sem,
+            "keyword": kw,
+            "tag": 0.0,
+            "recency": 1.0,
+            "evidence": 0.0,
+            "rerank": 0.0,
+            "total": total,
+        })
 
     # ── Select (skills first for evidence backlinks) ──
     print("Selecting best content...")
@@ -247,10 +317,16 @@ def main():
                             ref, 0) + bonus
     for i, p in enumerate(projects):
         if p["id"] in evidence_bonus:
-            proj_scores[i] += evidence_bonus[p["id"]]
+            bonus = evidence_bonus[p["id"]]
+            proj_scores[i] += bonus
+            proj_components[i]["evidence"] += bonus
+            proj_components[i]["total"] += bonus
     for i, r in enumerate(roles):
         if r["id"] in evidence_bonus:
-            role_scores[i] += evidence_bonus[r["id"]]
+            bonus = evidence_bonus[r["id"]]
+            role_scores[i] += bonus
+            role_components[i]["evidence"] += bonus
+            role_components[i]["total"] += bonus
 
     sel_roles, sel_role_scores = select_experience(roles, role_scores)
     sel_projects, sel_proj_scores = select_projects(projects, proj_scores)
@@ -271,7 +347,10 @@ def main():
         # Sigmoid-normalize logits to [0,1] before blending
         ce_norm = [1.0 / (1.0 + math.exp(-float(s))) for s in ce_scores_arr]
         for idx, ce_s in zip(ranked_indices, ce_norm):
-            proj_scores[idx] += ce_s * 0.15
+            bonus = ce_s * 0.15
+            proj_scores[idx] += bonus
+            proj_components[idx]["rerank"] += bonus
+            proj_components[idx]["total"] += bonus
         sel_projects, sel_proj_scores = select_projects(projects, proj_scores)
 
     # ── Build contexts ──
@@ -279,7 +358,7 @@ def main():
     proj_ctx = [build_project_context(p) for p in sel_projects]
 
     # ── Budget enforcement (priority-aware: low-priority section trimmed/dropped first) ──
-    line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
+    line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data, sel_certs)
     max_lines = MAX_PAGE_LINES
 
     # Build ordered passes: trim bullets, then drop items.
@@ -310,7 +389,12 @@ def main():
         for item in ctx_list:
             if len(item["bullets"]) > min_bullets:
                 item["bullets"] = item["bullets"][:min_bullets]
-        line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
+        line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data, sel_certs)
+
+    # Pass 2.5: trim certifications before dropping substantive content.
+    while line_est > max_lines and len(sel_certs) > config.MIN_CERTIFICATIONS:
+        sel_certs.pop()
+        line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data, sel_certs)
 
     # Passes 3-4: drop lowest-scoring items (lists are still score-ranked)
     for _label, ctx_list, sel_list, score_list, min_count in drop_passes:
@@ -318,7 +402,7 @@ def main():
             ctx_list.pop()
             sel_list.pop()
             score_list.pop()
-            line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data)
+            line_est = estimate_line_count(exp_ctx, proj_ctx, summary_data, sel_certs)
 
     # ── Chronological reordering (most recent first) ──
     proj_order = sorted(range(len(proj_ctx)), key=lambda i: parse_start_date(proj_ctx[i]["period"]), reverse=True)
@@ -384,19 +468,26 @@ def main():
 
     # ── Report ──
     print("Generating match report...")
-    exp_ranked = sorted(zip(roles, role_scores),
-                        key=lambda x: x[1], reverse=True)
+    sel_role_ids = {r["id"] for r in sel_roles}
+    exp_ranked = sorted(
+        [(r, role_components[i], r["id"] in sel_role_ids)
+         for i, r in enumerate(roles)],
+        key=lambda x: x[1]["total"],
+        reverse=True,
+    )
     sel_proj_ids = {p["id"] for p in sel_projects}
     proj_ranked = sorted(
-        [(p, s, p["id"] in sel_proj_ids)
-         for p, s in zip(projects, proj_scores)],
-        key=lambda x: x[1],
+        [(p, proj_components[i], p["id"] in sel_proj_ids)
+         for i, p in enumerate(projects)],
+        key=lambda x: x[1]["total"],
         reverse=True,
     )
     sel_cert_ids = {c["id"] for c in sel_certs}
     cert_ranked = [
-        (c, s, c["id"] in sel_cert_ids)
-        for c, s in sorted(zip(certs, cert_scores), key=lambda x: x[1], reverse=True)
+        (c, cert_components[i], c["id"] in sel_cert_ids)
+        for i, c in sorted(
+            enumerate(certs), key=lambda x: cert_components[x[0]]["total"], reverse=True
+        )
     ]
 
     report = generate_report(args.company, args.role, exp_ranked,
@@ -405,13 +496,12 @@ def main():
 
     # ── Visualization ──
     print("Generating visualization...")
-    sel_role_ids = {r["id"] for r in sel_roles}
     viz_path = generate_visualization(
         out_dir, args.company, args.role,
         projects, proj_scores, sel_proj_ids,
         roles, role_scores, sel_role_ids,
         all_skill_scores,
-        certs, cert_scores, sel_cert_ids,
+        certs, cert_scores, sel_cert_ids, CERT_THRESHOLD,
     )
 
     print(f"\nDone! Output in: {out_dir}")

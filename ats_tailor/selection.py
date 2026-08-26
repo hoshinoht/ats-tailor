@@ -7,6 +7,7 @@ import numpy as np
 from .config import (
     CERT_THRESHOLD,
     CHARS_PER_BULLET_LINE,
+    MAX_CERTIFICATIONS,
     MAX_EXPERIENCE,
     MAX_PROJECTS,
     MAX_SKILL_LINES,
@@ -55,8 +56,11 @@ def select_skills(categories, jd_embeddings, model, jd_lower, jd_text="", max_li
             all_skill_scores.append((skill["name"], cat["name"], score))
 
         skill_rankings.sort(
-            key=lambda x: (PROF_RANK.get(
-                x[0].get("proficiency", "familiar"), 2), -x[1])
+            key=lambda x: (
+                -x[1],
+                PROF_RANK.get(x[0].get("proficiency", "familiar"), 2),
+                x[0]["name"].lower(),
+            )
         )
         top5_scores = sorted([s for _, s in skill_rankings], reverse=True)[:5]
         avg_score = np.mean(top5_scores) if top5_scores else 0
@@ -90,17 +94,18 @@ def select_skills(categories, jd_embeddings, model, jd_lower, jd_text="", max_li
     return lines[:max_lines], all_skill_scores
 
 
-def select_certifications(certs, scores, threshold=CERT_THRESHOLD, min_n=MIN_CERTIFICATIONS):
+def select_certifications(certs, scores, threshold=CERT_THRESHOLD,
+                          min_n=MIN_CERTIFICATIONS, max_n=MAX_CERTIFICATIONS):
     """Select certifications above threshold, guaranteeing at least min_n."""
     ranked = sorted(zip(certs, scores), key=lambda x: x[1], reverse=True)
     above = [(c, s) for c, s in ranked if s > threshold]
     # Guarantee minimum count from top-ranked even if below threshold
     if len(above) < min_n:
         above = ranked[:min_n]
-    return [c for c, _s in above]
+    return [c for c, _s in above[:max_n]]
 
 
-def estimate_line_count(experience, projects, summary=None):
+def estimate_line_count(experience, projects, summary=None, certifications=None):
     """Rough estimate of content lines to check 1-page fit."""
     lines = 0
     lines += 3  # header
@@ -125,5 +130,11 @@ def estimate_line_count(experience, projects, summary=None):
                                CHARS_PER_BULLET_LINE) if proj.get("tech_line") else 1
         lines += 1 + tech_lines + bullet_lines + 1
     lines += 5  # skills section
-    lines += 3  # certifications + spacing
+    if certifications:
+        cert_text = " | ".join(
+            f"{c.get('name', '')} -- {c.get('issuer', '')}" for c in certifications
+        )
+        lines += 1  # certifications section header
+        lines += math.ceil(len(cert_text) / CHARS_PER_BULLET_LINE) if cert_text else 0
+        lines += 1  # spacing
     return lines

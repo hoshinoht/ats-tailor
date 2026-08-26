@@ -24,6 +24,16 @@ UNSEL_COLOR = "#D1D5DB"
 THRESH_COLOR = "#EF4444"
 
 
+def _md_cell(value):
+    """Escape a value for a Markdown table cell."""
+    text = "" if value is None else str(value)
+    return text.replace("\n", " ").replace("|", r"\|")
+
+
+def _fmt(component, key):
+    return f"{float(component.get(key, 0.0)):.3f}"
+
+
 def generate_report(company, role, exp_ranked, proj_ranked, skill_lines, cert_ranked, gaps=None, llm_terms=None):
     """Generate a markdown match report."""
     lines = [
@@ -31,22 +41,31 @@ def generate_report(company, role, exp_ranked, proj_ranked, skill_lines, cert_ra
         "",
         "## Experience Rankings",
         "",
-        "| Rank | Role | Company | Score |",
-        "|------|------|---------|-------|",
+        "| Rank | Selected | Role | Company | Total | Semantic | Keyword | Tags | Recency | Evidence |",
+        "|------|----------|------|---------|-------|----------|---------|------|---------|----------|",
     ]
-    for i, (r, s) in enumerate(exp_ranked, 1):
-        lines.append(f"| {i} | {r['title']} | {r['company']} | {s:.3f} |")
+    for i, (r, comp, sel) in enumerate(exp_ranked, 1):
+        mark = "Y" if sel else ""
+        lines.append(
+            f"| {i} | {mark} | {_md_cell(r['title'])} | {_md_cell(r['company'])} | "
+            f"{_fmt(comp, 'total')} | {_fmt(comp, 'semantic')} | {_fmt(comp, 'keyword')} | "
+            f"{_fmt(comp, 'tag')} | {float(comp.get('recency', 1.0)):.2f}x | {_fmt(comp, 'evidence')} |"
+        )
 
     lines += [
         "",
         "## Project Rankings",
         "",
-        "| Rank | Project | Score | Selected |",
-        "|------|---------|-------|----------|",
+        "| Rank | Selected | Project | Total | Semantic | Keyword | Tags | Recency | Evidence | Rerank |",
+        "|------|----------|---------|-------|----------|---------|------|---------|----------|--------|",
     ]
-    for i, (p, s, sel) in enumerate(proj_ranked, 1):
+    for i, (p, comp, sel) in enumerate(proj_ranked, 1):
         mark = "Y" if sel else ""
-        lines.append(f"| {i} | {p['name']} | {s:.3f} | {mark} |")
+        lines.append(
+            f"| {i} | {mark} | {_md_cell(p['name'])} | {_fmt(comp, 'total')} | "
+            f"{_fmt(comp, 'semantic')} | {_fmt(comp, 'keyword')} | {_fmt(comp, 'tag')} | "
+            f"{float(comp.get('recency', 1.0)):.2f}x | {_fmt(comp, 'evidence')} | {_fmt(comp, 'rerank')} |"
+        )
 
     lines += [
         "",
@@ -61,12 +80,15 @@ def generate_report(company, role, exp_ranked, proj_ranked, skill_lines, cert_ra
             "",
             "## Certification Rankings",
             "",
-            "| Cert | Score | Selected |",
-            "|------|-------|----------|",
+            "| Selected | Cert | Issuer | Total | Semantic | Keyword |",
+            "|----------|------|--------|-------|----------|---------|",
         ]
-        for c, s, sel in cert_ranked:
+        for c, comp, sel in cert_ranked:
             mark = "Y" if sel else ""
-            lines.append(f"| {c['name']} | {s:.3f} | {mark} |")
+            lines.append(
+                f"| {mark} | {_md_cell(c['name'])} | {_md_cell(c['issuer'])} | "
+                f"{_fmt(comp, 'total')} | {_fmt(comp, 'semantic')} | {_fmt(comp, 'keyword')} |"
+            )
 
     if gaps:
         lines += [
@@ -100,7 +122,7 @@ def generate_visualization(
     projects, proj_scores, sel_proj_ids,
     roles, role_scores, sel_role_ids,
     all_skill_scores,
-    certs, cert_scores, sel_cert_ids,
+    certs, cert_scores, sel_cert_ids, cert_threshold=0.25,
 ):
     """Generate a 4-panel match visualization PNG."""
     fig, axes = plt.subplots(2, 2, figsize=(18, 14))
@@ -183,11 +205,11 @@ def generate_visualization(
               in sel_cert_ids else UNSEL_COLOR for c, _ in ranked]
     bars = ax.barh(names, scores, color=colors,
                    edgecolor="white", linewidth=0.5)
-    ax.axvline(x=0.25, color=THRESH_COLOR, linestyle="--",
-               linewidth=1, alpha=0.7, label="Threshold (0.25)")
+    ax.axvline(x=cert_threshold, color=THRESH_COLOR, linestyle="--",
+               linewidth=1, alpha=0.7, label=f"Threshold ({cert_threshold:.2f})")
     ax.set_xlabel("Hybrid Score", fontsize=9)
     ax.set_title("Certifications", fontsize=12, fontweight="bold")
-    ax.set_xlim(0, max(scores) * 1.15 if scores else 1)
+    ax.set_xlim(0, max(max(scores) if scores else 0, cert_threshold) * 1.15 or 1)
     ax.tick_params(axis="y", labelsize=8)
     for bar, score in zip(bars, scores):
         ax.text(bar.get_width() + 0.005, bar.get_y() + bar.get_height() / 2,
