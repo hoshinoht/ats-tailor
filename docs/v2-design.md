@@ -94,7 +94,7 @@ index/
   projects/<id>.yaml
 ```
 
-Schema (pydantic v2, `ats_tailor/models.py`; JSON Schema written into
+Schema (pydantic v2, `ats_tailor/index/models.py`; JSON Schema written into
 `<index>/.schema/` by `migrate` or `ats-tailor schema --index`, which the files'
 `$schema` hints point at):
 
@@ -179,7 +179,7 @@ time.
 - `runs(id, jd_hash, config_hash, created, status, json)`
 - `run_notes(run_id, created_at, note)` — the tracker's history
 
-Built in 3b (`ats_tailor/store.py`), with two tables from the original sketch
+Built in 3b (`ats_tailor/runs/store.py`), with two tables from the original sketch
 deliberately absent:
 
 - **`overrides`** is not its own table. An override is a file the user edits
@@ -269,18 +269,29 @@ packages/ats-match/      pure matching library — no YAML, LaTeX, or resume voc
     eval.py        coverage@budget, P@k, Kendall τ on abstract labels
     providers.py   Protocols: Embedder, Reranker (injected; core has no model deps)
 
-packages/ats-tailor/     resume application — depends on ats-match
+ats-tailor/              resume application — depends on ats-match (repo root)
   ats_tailor/
+    cli.py         argparse front-end; the `ats-tailor` script is `cli:main`
+    service.py     one in-process typed API used by every front-end
+    config.py      settings, from the environment and `.env`
     index/         models, IO, migration, validation
     jd/            JD store, extraction (LLM/agent/fallback), gates
-    adapt.py       Index → Claims (bullets/evidence → Claim, group = item id, cost = est. lines)
-                   Selection → render context
-    render/        LaTeX template, alias-aligned surface forms, compile loop
-    atscheck.py    parse check + keyword table
-    tracker.py     applications, statuses, follow-ups
-    service.py     one in-process typed API used by every front-end
-    cli/  tui/  mcp/  http/
+    llm/           backends (Ollama, LM Studio, MLX) and the v2 provider
+    engine/        pipeline (v2), adapt, embedding, rerank, results
+      legacy/      scoring, selection, tailor — the v1 whole-item ranking
+    render/        LaTeX template, the match report, alias-aligned surface forms
+    ats/           check.py: parse check + keyword table
+    evaluation/    labels + the scoring sweep and its config fingerprint
+    runs/          store (SQLite), sync, tracker, per-run overrides
+    tui/  mcp/  http/
+    tailor.py      shim: `python -m ats_tailor.tailor` still reaches the v1 entry
 ```
+
+`adapt.py` (`Index` → claims: bullets/evidence become a `Claim` whose group is
+the item id and whose cost is its estimated line count; a `Selection` becomes a
+render context) sits in `engine/`, next to the pipeline that uses it. The
+layout above was reached by a move-only refactor between Phases 4a and 4b —
+`docs/plans/refactor-layout.md`.
 
 Boundary rules: `ats_match` never imports `ats_tailor`; it has no notion of
 "project", "role", or "page"; models are injected through the provider

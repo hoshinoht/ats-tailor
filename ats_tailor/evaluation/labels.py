@@ -24,7 +24,7 @@ from typing import Iterable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .index_io import slugify
+from ..index.io import slugify
 
 
 class Label(BaseModel):
@@ -184,7 +184,7 @@ def init_label(
     force: bool = False,
 ) -> Path:
     """Write a scaffold label file for ``jd_path``; returns the path written."""
-    from .atscheck import auto_terms, gap_terms
+    from ..ats.check import auto_terms, gap_terms
 
     jd_path = Path(jd_path)
     path = label_path(labels_dir, jd_path)

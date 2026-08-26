@@ -25,7 +25,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from . import config
+from .. import config
 
 #: The database file inside the resolved data directory.
 STORE_FILENAME = "ats.db"

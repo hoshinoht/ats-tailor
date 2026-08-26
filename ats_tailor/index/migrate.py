@@ -2,7 +2,7 @@
 
 The migration is lossless by construction: ``ats_tags`` are partitioned into
 skill references and free-text keywords, ``responsibilities``/``impact``/
-``bullets`` become structured :class:`~ats_tailor.models.Bullet` objects with
+``bullets`` become structured :class:`~ats_tailor.index.models.Bullet` objects with
 pre-filled metrics, and period strings are parsed into structured periods.
 """
 
@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .index_io import save_index_v2, save_role, slugify
+from .io import save_index_v2, save_role, slugify
 from .loaders import load_index
 from .models import (
     Bullet,
@@ -27,7 +27,7 @@ from .models import (
     SkillCategory,
     Summaries,
 )
-from .scoring import keyword_in_text
+from ..engine.legacy.scoring import keyword_in_text
 
 SKILL_ID_OVERRIDES = {
     "c#": "csharp",

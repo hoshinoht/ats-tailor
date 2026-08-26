@@ -19,9 +19,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import config
-from .adapt import claims_from_index
-from .models import Index
+from .. import config
+from ..engine.adapt import claims_from_index
+from ..index.models import Index
 from .store import Store
 
 #: ``entities.id`` is namespaced by kind: a skill and a project are allowed to
@@ -94,8 +94,8 @@ def skill_texts(index: Index) -> list[str]:
 
 
 def cert_texts(index: Index) -> list[str]:
-    from .index_io import to_legacy
-    from .scoring import build_cert_text
+    from ..index.io import to_legacy
+    from ..engine.legacy.scoring import build_cert_text
 
     _skills, _projects, _exp, certs, _summary = to_legacy(index)
     return [build_cert_text(cert) for cert in certs["certifications"]]
@@ -109,7 +109,7 @@ def sync(
     index: Index | None = None,
 ) -> SyncReport:
     """Upsert every entity, prune what the index no longer has, optionally embed."""
-    from .index_io import load_index_v2
+    from ..index.io import load_index_v2
 
     started = time.monotonic()
     index_dir = Path(index_dir)
@@ -137,7 +137,7 @@ def sync(
 
 def _embed(index: Index, store: Store, model: str | None) -> tuple[int, int]:
     """Fill the cache for claim, skill and certification texts; returns (new, hit)."""
-    from .embedding import SentenceTransformerEmbedder, encode_store, text_hash
+    from ..engine.embedding import SentenceTransformerEmbedder, encode_store, text_hash
 
     embedder = SentenceTransformerEmbedder(model or config.EMBED_MODEL)
     groups = [

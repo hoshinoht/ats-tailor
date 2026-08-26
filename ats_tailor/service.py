@@ -38,7 +38,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import config
-from .index_io import (
+from .index.io import (
     detect_layout,
     load_index_v2,
     save_certifications,
@@ -51,7 +51,7 @@ from .index_io import (
 )
 from .jd.hashing import jd_hash
 from .jd.models import JDProfile
-from .models import (
+from .index.models import (
     Bullet,
     Certification,
     Education,
@@ -62,8 +62,8 @@ from .models import (
     SkillCategory,
     Summaries,
 )
-from .overrides import Overrides, overrides_path
-from .store import Run, Store, StatusError
+from .runs.overrides import Overrides, overrides_path
+from .runs.store import Run, Store, StatusError
 
 #: Codes an adapter has to handle. ``not_implemented`` is the Phase 5 stub.
 ERROR_CODES: tuple[str, ...] = (
@@ -433,7 +433,7 @@ def auto_metrics(text: str) -> list[str]:
     """Every number a bullet claims, so a later rephrase cannot quietly drop one.
 
     Deliberately greedy: ``metrics`` exists for
-    :func:`ats_tailor.overrides.metric_warnings`, which asks "does the edited
+    :func:`ats_tailor.runs.overrides.metric_warnings`, which asks "does the edited
     wording still carry this?". A number the bullet mentions in passing costs
     one harmless warning; a number that was never recorded costs the check.
     """
@@ -574,7 +574,7 @@ class Service:
     @property
     def profile(self) -> dict:
         if self._profile is None:
-            from .loaders import load_profile
+            from .index.loaders import load_profile
 
             try:
                 self._profile = load_profile(self.profile_path)
@@ -923,9 +923,9 @@ class Service:
         """
         from ats_match import build_matrix
 
-        from .adapt import alias_map, claims_from_index, header_claims, skill_claims
-        from .atscheck import gap_terms
-        from .embedding import SentenceTransformerEmbedder, encode_store
+        from .engine.adapt import alias_map, claims_from_index, header_claims, skill_claims
+        from .ats.check import gap_terms
+        from .engine.embedding import SentenceTransformerEmbedder, encode_store
 
         path = self.jd_path(slug)
         text = path.read_text(errors="replace")
@@ -1064,7 +1064,7 @@ class Service:
         self, out_dir: Path, patch: OverridesPatch | Overrides | None
     ) -> tuple[Overrides, list[str]]:
         """The overrides a run should use: the file on disk, plus any patch."""
-        from . import overrides as overrides_mod
+        from .runs import overrides as overrides_mod
 
         path = overrides_path(out_dir)
         current = overrides_mod.load(path) if path.is_file() else Overrides()
@@ -1093,8 +1093,8 @@ class Service:
         extra_warnings: Sequence[str] = (),
         supersedes: str | None = None,
     ) -> RunSummary:
-        from .pipeline import V2Options, tailor_v2
-        from .tracker import record as record_run
+        from .engine.pipeline import V2Options, tailor_v2
+        from .runs.tracker import record as record_run
 
         warnings: list[str] = list(extra_warnings)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1162,7 +1162,7 @@ class Service:
         )
 
     def _config_hash(self) -> str | None:
-        from .evaluate import config_fingerprint
+        from .evaluation.evaluate import config_fingerprint
 
         try:
             return config_fingerprint(self.index_dir, "v2")[0]
@@ -1242,8 +1242,8 @@ class Service:
 
     def compile(self, run_id: str) -> CompileSummary:
         """Compile a run's ``resume.tex`` and record the hash of what came out."""
-        from .atscheck import CompileError, compile_pdf
-        from .tracker import file_sha256
+        from .ats.check import CompileError, compile_pdf
+        from .runs.tracker import file_sha256
 
         run = self._run_row(run_id)
         out_dir = self._out_dir_of(run)
@@ -1308,7 +1308,7 @@ class Service:
         reports on disk, no stdout — an MCP server speaks JSON-RPC over that
         stream and one stray line of progress ends the session.
         """
-        from .atscheck import (
+        from .ats.check import (
             CompileError, compile_pdf, extract_text, index_term_forms,
             keyword_coverage, page_count, parse_check, resolve_terms, split_regions,
             summarize, surface_form_set, write_reports,
@@ -1347,7 +1347,7 @@ class Service:
 
     def _terms_for(self, labels: str | None, jd_text: str, index) -> tuple[list, list]:
         """``(must, nice)`` from a label file when there is one, else the JD."""
-        from .atscheck import auto_terms
+        from .ats.check import auto_terms
 
         if labels:
             path = Path(labels)
@@ -1359,7 +1359,7 @@ class Service:
                 try:
                     import yaml
 
-                    from .labels import Label
+                    from .evaluation.labels import Label
 
                     label = Label.model_validate(yaml.safe_load(path.read_text()))
                 except Exception:
@@ -1371,7 +1371,7 @@ class Service:
 
     def review_pack(self, run_id: str) -> ReviewPack:
         """One payload for a reviewing agent: posting, gates, choices, coverage."""
-        from .atscheck import gap_terms
+        from .ats.check import gap_terms
 
         run = self._run_row(run_id)
         data = dict(run.data or {})
@@ -1477,7 +1477,7 @@ class Service:
 
     def quiet(self, days: int = 10) -> list[dict[str, Any]]:
         """Open applications nobody has heard from for ``days`` days."""
-        from .tracker import quiet_runs
+        from .runs.tracker import quiet_runs
 
         return [
             {
@@ -1715,7 +1715,7 @@ class Service:
         return save_skill_category(category, self.index_dir)
 
     def _sync(self) -> None:
-        from .sync import sync
+        from .runs.sync import sync
 
         try:
             sync(self.index_dir, store=self.store, index=self.index)
@@ -1739,7 +1739,7 @@ class Service:
         provider: str = "none",
         only: Sequence[str] | None = None,
     ) -> EvalSummary:
-        from .evaluate import evaluate, render_table
+        from .evaluation.evaluate import evaluate, render_table
 
         if engine not in {"v1", "v2"}:
             raise ServiceError("invalid_input", f"unknown engine {engine!r}")
@@ -1764,7 +1764,7 @@ class Service:
 
     def labels_from_run(self, run_id: str) -> LabelUpdate:
         """Promote a run's pins and exclusions into its label file."""
-        from .labels import merge_overrides, slug as label_slug
+        from .evaluation.labels import merge_overrides, slug as label_slug
 
         run = self._run_row(run_id)
         overrides = (run.data or {}).get("overrides") or {}
@@ -1807,7 +1807,7 @@ def _which(name: str) -> bool:
 
 
 def _pdf_name(profile: Mapping[str, Any], company: str) -> str:
-    from .atscheck import output_filename
+    from .ats.check import output_filename
 
     return output_filename(str(profile.get("name", "")), company)
 

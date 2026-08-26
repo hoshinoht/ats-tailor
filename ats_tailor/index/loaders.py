@@ -66,7 +66,7 @@ def load_index(index_dir):
     Both layouts are projected onto the same five v1 dicts, so the rest of the
     pipeline is unaware of which one is on disk.
     """
-    from .index_io import detect_layout, load_index_v2, to_legacy
+    from .io import detect_layout, load_index_v2, to_legacy
 
     index_dir = Path(index_dir)
     if detect_layout(index_dir) == "v2":

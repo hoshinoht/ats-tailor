@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 
-from .config import (
+from ...config import (
     CERT_THRESHOLD,
     CHARS_PER_BULLET_LINE,
     MAX_CERTIFICATIONS,

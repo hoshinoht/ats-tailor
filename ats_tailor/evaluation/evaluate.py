@@ -8,7 +8,7 @@ two numbers are only ever compared when they mean the same thing.
 Metrics per JD (``docs/v2-design.md`` §6):
 
 ``must_coverage`` / ``nice_coverage`` / ``context_rate``
-    from :mod:`ats_tailor.atscheck` against the compiled PDF.
+    from :mod:`ats_tailor.ats.check` against the compiled PDF.
 ``parse_ok`` / ``pages``
     the structural check, and whether it still fits on one page.
 ``precision@k``
@@ -35,8 +35,8 @@ from typing import Any, Sequence
 
 from ats_match import kendall_tau, precision_at_k
 
-from . import config
-from .atscheck import (
+from .. import config
+from ..ats.check import (
     CompileError,
     auto_terms,
     compile_pdf,
@@ -97,7 +97,9 @@ def code_hash() -> str:
     # the fingerprint exactly as much as one in the application does.
     import ats_match
 
-    for package in (Path(__file__).resolve().parent, Path(ats_match.__file__).parent):
+    # ``parents[1]`` is the ``ats_tailor`` package root: this module lives one
+    # level down, in ``evaluation/``.
+    for package in (Path(__file__).resolve().parents[1], Path(ats_match.__file__).parent):
         sources = sorted(
             path
             for pattern in ("*.py", "*.j2")
@@ -139,7 +141,7 @@ def config_fingerprint(
     }
     payload = json.dumps(values, sort_keys=True).encode()
     digest = hashlib.sha256(payload).hexdigest()
-    return digest, {**values, "git_head": git_head(Path(__file__).resolve().parent.parent)}
+    return digest, {**values, "git_head": git_head(Path(__file__).resolve().parents[2])}
 
 
 # ── One run ───────────────────────────────────────────────────────────────────
@@ -171,7 +173,7 @@ def evaluate_one(
     reextract: bool = False,
 ) -> dict[str, Any]:
     """Run the pipeline for one label, compile, check, and score it."""
-    from .tailor import load_index_for_terms, run as run_pipeline
+    from ..engine.legacy.tailor import load_index_for_terms, run as run_pipeline
 
     run_dir.mkdir(parents=True, exist_ok=True)
     argv = [
@@ -267,7 +269,7 @@ def evaluate_one(
 
 
 def _load_profile(profile_path: Path) -> dict:
-    from .loaders import load_profile
+    from ..index.loaders import load_profile
 
     return load_profile(profile_path)
 

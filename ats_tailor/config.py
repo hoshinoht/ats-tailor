@@ -164,7 +164,7 @@ PIN_SKILL_GROUPS = _str("ATS_PIN_SKILL_GROUPS", "Programming Languages")
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or None
 
 # Runtime store (SQLite: embeddings, JD profiles, run records). Empty means
-# "beside the index directory" — see ats_tailor.store.data_dir.
+# "beside the index directory" — see ats_tailor.runs.store.data_dir.
 DATA_DIR = _str("ATS_DATA_DIR", "")
 
 # Page budget

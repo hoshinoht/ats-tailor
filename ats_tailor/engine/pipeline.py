@@ -21,7 +21,7 @@ from typing import Any, Sequence
 from ats_match import Params, build_matrix, select
 from ats_match.types import Constraints
 
-from . import config
+from .. import config
 from .adapt import (
     PAGE_TERMS_ATTR,
     alias_map,
@@ -32,28 +32,28 @@ from .adapt import (
     section_rules,
     skill_claims,
 )
-from .atscheck import CompileError, compile_pdf, gap_terms, index_term_forms, output_filename
+from ..ats.check import CompileError, compile_pdf, gap_terms, index_term_forms, output_filename
 from .embedding import SentenceTransformerEmbedder, encode_store
-from .index_io import to_legacy
-from .jd.extract import extract_requirements, save_edited
-from .jd.gates import gate_dict
-from .llm.provider import NoneProvider
-from .models import Index
-from .overrides import (
+from ..index.io import to_legacy
+from ..jd.extract import extract_requirements, save_edited
+from ..jd.gates import gate_dict
+from ..llm.provider import NoneProvider
+from ..index.models import Index
+from ..runs.overrides import (
     Overrides,
     apply_requirements,
     metric_warnings,
     resolve as resolve_overrides,
     text_map,
 )
-from .render.surface import align_labels, jd_forms
+from ..render.surface import align_labels, jd_forms
 from .rerank import load_reranker
-from .rendering import render_prompt, render_resume
-from .reporting import generate_requirement_visualization, generate_v2_report
+from ..render.latex import render_prompt, render_resume
+from ..render.report import generate_requirement_visualization, generate_v2_report
 from .results import RunResult
-from .scoring import build_cert_text, chunk_text, compute_keyword_bonus
-from .selection import estimate_line_count, select_certifications
-from .store import Store
+from .legacy.scoring import build_cert_text, chunk_text, compute_keyword_bonus
+from .legacy.selection import estimate_line_count, select_certifications
+from ..runs.store import Store
 
 #: How much of the page a run gives back when the PDF spills onto page two.
 BUDGET_STEP = 4
@@ -344,7 +344,7 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _reranker(options: V2Options, provider):
-    """The reranker this run asked for (``ats_tailor.rerank``), or ``None``."""
+    """The reranker this run asked for (``ats_tailor.engine.rerank``), or ``None``."""
     if not options.rerank:
         return None
     mode = options.rerank_mode or (
@@ -366,7 +366,7 @@ def _summary_variant(summary_data: dict | None, index: Index, archetype, say):
 
 def _requirement_spec(requirement):
     """One ``ats_match.Requirement`` back in the profile's own shape."""
-    from .jd.models import RequirementSpec
+    from ..jd.models import RequirementSpec
 
     return RequirementSpec(
         id=requirement.id, text=requirement.text, kind=requirement.kind,

@@ -17,6 +17,28 @@ Optional extras: `--extra mlx` (local MLX inference), `--extra dev` (pytest).
 The repo is a `uv` workspace with two distributions: this application, and
 `packages/ats-match` — the pure matching core. `uv sync` builds both.
 
+## Package layout
+
+```
+ats_tailor/
+  cli.py           argparse front end; `ats-tailor` is `cli:main`
+  service.py       the one in-process typed API every front end goes through
+  config.py        settings, read from the environment and `.env`
+  index/           models, the v2 directory layout, the v1 loader, migration
+  jd/              reading a posting: gates, extraction, requirements
+  llm/             backends (Ollama, LM Studio, MLX) and the v2 provider
+  engine/          selection: pipeline, adapt, embedding, rerank, results
+    legacy/        the v1 whole-item ranking, behind `--engine v1`
+  render/          LaTeX, the match report, alias-aligned surface forms
+  ats/             what an ATS makes of the PDF: parse checks and coverage
+  evaluation/      labels and the scoring sweep
+  runs/            SQLite store, index sync, tracker, per-run overrides
+  mcp/             the stdio MCP server
+  tailor.py        compatibility shim for `python -m ats_tailor.tailor`
+```
+
+`docs/v2-design.md` §7 has the reasoning behind the split.
+
 ## CLI
 
 ```bash

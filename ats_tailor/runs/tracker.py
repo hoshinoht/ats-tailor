@@ -39,7 +39,7 @@ def run_id(
     exists not to do. ``taken`` answers whether an id is already in the store;
     the suffix counts up from ``-2`` until it is not.
     """
-    from .tailor import _safe_slug
+    from ..engine.legacy.tailor import _safe_slug
 
     stamp = (when or datetime.now()).strftime("%Y%m%d-%H%M%S")
     base = f"{_safe_slug(company, role)}-{stamp}"

@@ -21,7 +21,7 @@ import pytest
 from ats_match import Claim, Requirement, build_matrix
 
 from ats_tailor import config
-from ats_tailor.adapt import render_context
+from ats_tailor.engine.adapt import render_context
 from ats_tailor.jd import gates as gates_mod
 from ats_tailor.jd.extract import (
     deterministic_profile,
@@ -38,15 +38,15 @@ from ats_tailor.jd.models import Gate, Gates, JDProfile, RequirementSpec
 from ats_tailor.llm.provider import (
     ExternalProvider, NoneProvider, get_provider,
 )
-from ats_tailor.models import (
+from ats_tailor.index.models import (
     Bullet, Index, Period, Project, Role, Skill, SkillCategory, Summaries,
 )
 from ats_tailor.render.surface import (
     align_labels, dedupe_labels, is_acronym_like, jd_forms, skill_label,
 )
-from ats_tailor.rendering import render_resume
-from ats_tailor.rerank import ProviderReranker, load_reranker
-from ats_tailor.store import Store
+from ats_tailor.render.latex import render_resume
+from ats_tailor.engine.rerank import ProviderReranker, load_reranker
+from ats_tailor.runs.store import Store
 
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples" / "index"
@@ -280,7 +280,7 @@ def test_a_covered_requirement_is_not_appended_twice():
 # ── 3. extraction, the cache, and the human edit ─────────────────────────────
 def test_provider_none_reproduces_the_deterministic_parser(store):
     index = tiny_index()
-    from ats_tailor.atscheck import gap_terms, index_term_forms
+    from ats_tailor.ats.check import gap_terms, index_term_forms
 
     profile = extract_requirements(JD, index, NoneProvider(), store, say=lambda *_: None)
     expected = deterministic_profile(
@@ -575,7 +575,7 @@ def test_no_target_title_leaves_the_summary_as_it_was():
 
 
 def test_the_summary_variant_is_chosen_by_archetype():
-    from ats_tailor.pipeline import _summary_variant
+    from ats_tailor.engine.pipeline import _summary_variant
 
     index = tiny_index()
     base = {"summary": "A backend engineer.", "highlights": []}
@@ -684,7 +684,7 @@ def test_the_engine_defaults_to_v2():
 
 
 def test_provider_choice_reads_the_flags():
-    from ats_tailor.tailor import provider_choice
+    from ats_tailor.engine.legacy.tailor import provider_choice
 
     class Args:
         provider = None
@@ -729,7 +729,7 @@ def test_writing_an_edit_does_not_erase_the_extraction_it_came_from(store):
 
 
 def test_a_run_id_never_overwrites_an_existing_run():
-    from ats_tailor import tracker
+    from ats_tailor.runs import tracker
 
     existing = {"acme-sre-20260101-090000", "acme-sre-20260101-090000-2"}
     from datetime import datetime
@@ -740,7 +740,7 @@ def test_a_run_id_never_overwrites_an_existing_run():
 
 
 def test_the_tracker_marks_a_run_whose_gates_say_something(store):
-    from ats_tailor import tracker
+    from ats_tailor.runs import tracker
 
     store.record_run("r1", "Acme", "SRE", {"gates": {"eligibility": {"verdict": "fail"}}})
     store.record_run("r2", "Acme", "SRE", {"gates": {"eligibility": {"verdict": "pass"}}})

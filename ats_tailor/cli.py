@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 from . import config
-from .index_io import SCHEMA_DIRNAME, write_index_schemas, write_schemas
+from .index.io import SCHEMA_DIRNAME, write_index_schemas, write_schemas
 
 USAGE = """usage: ats-tailor <command> [options]
 
@@ -236,16 +236,16 @@ def _cmd_review_pack(argv: list[str]) -> int:
 
 
 def _cmd_tailor(argv: list[str]) -> int:
-    from .tailor import run
+    from .engine.legacy.tailor import run
 
     run(argv)
     return 0
 
 
 def _cmd_validate(argv: list[str]) -> int:
-    from .index_io import detect_layout, load_index_v2, to_legacy
-    from .loaders import load_index, validate_index
-    from .migrate import build_v2_index
+    from .index.io import detect_layout, load_index_v2, to_legacy
+    from .index.loaders import load_index, validate_index
+    from .index.migrate import build_v2_index
 
     parser = argparse.ArgumentParser(prog="ats-tailor validate")
     parser.add_argument("index_dir", nargs="?", default="index",
@@ -284,7 +284,7 @@ def _cmd_validate(argv: list[str]) -> int:
 
 
 def _cmd_migrate(argv: list[str]) -> int:
-    from .migrate import migrate_v1_to_v2
+    from .index.migrate import migrate_v1_to_v2
 
     parser = argparse.ArgumentParser(prog="ats-tailor migrate")
     parser.add_argument("src", help="v1 index directory")
@@ -329,7 +329,7 @@ def _cmd_schema(argv: list[str]) -> int:
 
 def _open_store(index_dir, data_dir=None):
     """The store for this invocation: ``--data-dir`` wins, else the index's."""
-    from .store import Store, store_path
+    from .runs.store import Store, store_path
 
     if data_dir:
         return Store(Path(data_dir) / "ats.db")
@@ -337,7 +337,7 @@ def _open_store(index_dir, data_dir=None):
 
 
 def _cmd_sync(argv: list[str]) -> int:
-    from .sync import sync
+    from .runs.sync import sync
 
     parser = argparse.ArgumentParser(
         prog="ats-tailor sync",
@@ -370,7 +370,7 @@ def _cmd_sync(argv: list[str]) -> int:
 
 
 def _cmd_override(argv: list[str]) -> int:
-    from . import overrides as overrides_mod
+    from .runs import overrides as overrides_mod
 
     parser = argparse.ArgumentParser(
         prog="ats-tailor override",
@@ -428,8 +428,8 @@ def _cmd_override(argv: list[str]) -> int:
 
 
 def _cmd_runs(argv: list[str]) -> int:
-    from .store import STATUSES, StatusError
-    from .tracker import QUIET_DAYS, render_list, render_quiet, render_show, quiet_runs
+    from .runs.store import STATUSES, StatusError
+    from .runs.tracker import QUIET_DAYS, render_list, render_quiet, render_show, quiet_runs
 
     parser = argparse.ArgumentParser(prog="ats-tailor runs")
     parser.add_argument("--index", default="index", help="index directory (default: index/)")
@@ -515,8 +515,8 @@ def _cmd_jd(argv: list[str]) -> int:
     from .jd.hashing import jd_hash
     from .jd.models import JDProfile
     from .llm.provider import get_provider
-    from .loaders import load_profile
-    from .tailor import load_index_for_terms
+    from .index.loaders import load_profile
+    from .engine.legacy.tailor import load_index_for_terms
 
     parser = argparse.ArgumentParser(
         prog="ats-tailor jd",
@@ -692,14 +692,14 @@ def _resolve_profile(explicit, index_dir):
 def _cmd_check(argv: list[str]) -> int:
     import json
 
-    from .atscheck import (
+    from .ats.check import (
         CompileError, auto_terms, compile_pdf, entries_from_tex, extract_text,
         index_term_forms, keyword_coverage, output_filename, page_count,
         parse_check, resolve_terms, split_regions, summarize, surface_form_set,
         write_reports,
     )
-    from .loaders import load_profile
-    from .tailor import load_index_for_terms
+    from .index.loaders import load_profile
+    from .engine.legacy.tailor import load_index_for_terms
 
     parser = argparse.ArgumentParser(
         prog="ats-tailor check",
@@ -766,7 +766,7 @@ def _cmd_check(argv: list[str]) -> int:
         all_terms = index_term_forms(index_obj)
         must, nice = [], []
         if args.labels:
-            from .labels import Label
+            from .evaluation.labels import Label
             import yaml as _yaml
 
             label = Label.model_validate(_yaml.safe_load(Path(args.labels).read_text()))
@@ -790,8 +790,8 @@ def _cmd_check(argv: list[str]) -> int:
 
 
 def _cmd_labels(argv: list[str]) -> int:
-    from .labels import init_label, load_labels
-    from .tailor import load_index_for_terms
+    from .evaluation.labels import init_label, load_labels
+    from .engine.legacy.tailor import load_index_for_terms
 
     parser = argparse.ArgumentParser(prog="ats-tailor labels")
     sub = parser.add_subparsers(dest="action", required=True)
@@ -847,8 +847,8 @@ def _cmd_labels(argv: list[str]) -> int:
 
 def _labels_from_run(args) -> int:
     """``labels from-run``: promote one run's overrides into its label file."""
-    from .labels import merge_overrides, slug
-    from .tailor import load_index_for_terms
+    from .evaluation.labels import merge_overrides, slug
+    from .engine.legacy.tailor import load_index_for_terms
 
     try:
         store = _open_store(args.index, args.data_dir)
@@ -909,7 +909,7 @@ def _resolve_run(store, reference: str):
 
 
 def _cmd_eval(argv: list[str]) -> int:
-    from .evaluate import compare, evaluate, render_table
+    from .evaluation.evaluate import compare, evaluate, render_table
 
     parser = argparse.ArgumentParser(
         prog="ats-tailor eval",

@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .scoring import AMBIGUOUS_KEYWORDS, chunk_text
+from ..engine.legacy.scoring import AMBIGUOUS_KEYWORDS, chunk_text
 
 # ── Section headings ──────────────────────────────────────────────────────────
 #: Canonical region name → the heading strings accepted for it, in template
@@ -839,8 +839,8 @@ def gap_terms(jd_text: str, index: Any, extra_known: Sequence[str] = ()) -> list
     ``missing (gap)`` verdicts at all — terms drawn from the taxonomy never
     can, and a gap the user never sees is a gap they cannot decide about.
     """
-    from .index_io import to_legacy
-    from .llm import detect_coverage_gaps
+    from ..index.io import to_legacy
+    from ..llm import detect_coverage_gaps
 
     if hasattr(index, "all_skills"):
         skills_data, projects_data, exp_data, certs_data, _ = to_legacy(index)

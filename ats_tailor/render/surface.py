@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
-from ..atscheck import count_in_text
+from ..ats.check import count_in_text
 
 #: An acronym-shaped form: short and upper-case, possibly with digits ("K8s"
 #: counts — one lower-case letter inside an otherwise upper-case token).

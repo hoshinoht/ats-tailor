@@ -11,7 +11,7 @@ import pytest
 import yaml
 from ruamel.yaml import YAML
 
-from ats_tailor.index_io import (
+from ats_tailor.index.io import (
     SCHEMA_DIRNAME,
     SCHEMA_MODELS,
     detect_layout,
@@ -21,9 +21,9 @@ from ats_tailor.index_io import (
     save_role,
     to_legacy,
 )
-from ats_tailor.loaders import load_index, parse_end_date, parse_start_date
-from ats_tailor.migrate import find_metrics, migrate_v1_to_v2, pick_acronym, skill_id_for
-from ats_tailor.models import (
+from ats_tailor.index.loaders import load_index, parse_end_date, parse_start_date
+from ats_tailor.index.migrate import find_metrics, migrate_v1_to_v2, pick_acronym, skill_id_for
+from ats_tailor.index.models import (
     Bullet,
     Certification,
     Index,

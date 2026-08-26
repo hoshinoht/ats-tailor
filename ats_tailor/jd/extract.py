@@ -34,7 +34,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from jinja2 import Environment, FileSystemLoader
 
 from .. import config
-from ..atscheck import count_in_text, gap_terms, index_term_forms
+from ..ats.check import count_in_text, gap_terms, index_term_forms
 from .gates import cross_check, detect_gates
 from .hashing import jd_hash
 from .models import JDProfile, RequirementSpec, WEIGHT_RANGE, squash
@@ -106,7 +106,7 @@ def render_extract_prompt(
 def term_alias_map(index: Any) -> dict[str, str]:
     """Lowercased surface form → the canonical index term it stands for.
 
-    Not :func:`ats_tailor.adapt.alias_map`, which answers with a *skill id*.
+    Not :func:`ats_tailor.engine.adapt.alias_map`, which answers with a *skill id*.
     Requirement terms are matched against claim terms, and those are surface
     forms, so the canonical *name* is what a posting's "K8s" has to become.
     """

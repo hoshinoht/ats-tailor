@@ -91,3 +91,39 @@ ats_tailor/
 
 ## Out of scope
 Renaming functions or classes, splitting `cli.py`, touching `ats_match`.
+
+## Result
+
+Delivered 2026-08-26, exactly as specced: 23 `git mv`s, six new
+`__init__.py` files (docstring only — no re-exports, so nothing new is
+imported eagerly), 116 rewritten import lines across the package and six
+test modules. `ats_match` untouched.
+
+Two `__file__`-relative lookups had to move with their module:
+`evaluate.code_hash()` now walks `parents[1]` (the package root, one level
+up from `evaluation/`) and `config_fingerprint` reads `git_head` from
+`parents[2]`. Everything else was already relative to its own module:
+`render/latex.py`'s `PKG_DIR` still points at the directory holding
+`template.tex.j2` and `prompt_template.md.j2` because the templates moved
+into `render/` with it, `jd/extract.py` did not move, and `config.py`
+stayed at the top level so `.env` still resolves to the repo root. The
+store, tracker and overrides path helpers never used `__file__`.
+
+One shim: `ats_tailor/tailor.py`, re-exporting `main`, `run`,
+`load_index_for_terms` and `provider_choice` from
+`ats_tailor.engine.legacy.tailor` plus a `__main__` guard. It is the only
+old path any documentation or wrapper reaches for — the repo's `./tailor`
+falls back to `python -m ats_tailor.tailor` when `uv` is missing, and both
+READMEs show that form. Nothing else needed one: no README, `AGENTS.md`, or
+example imports `atscheck`, `evaluate` or `store`. `hatchling` picks up the
+relocated `.j2` files with no `pyproject` change — a default `packages =
+["ats_tailor"]` wheel already ships everything under the package.
+
+Verified: `pytest` 310 → 312 and `ATS_SMOKE=1` 322 → 324 (the two new tests
+cover the shim's re-export and `python -m ats_tailor.tailor --help`), zero
+failures; all three `--help` entry points and the parent's `./tailor …
+--check` (parse 14/14) still work; the wheel carries all 46 `.py` and 3
+`.j2` files, the same 49 that `code_hash()` walks; and a v2 eval against
+`eval/30a5cd1d5a71.json` came back `+0.000` on every metric with all 14
+runs byte-identical, `selected_projects` and `selected_roles` included.
+Only `code_hash` moved, as intended.

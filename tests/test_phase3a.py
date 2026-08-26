@@ -18,7 +18,7 @@ import pytest
 
 from ats_match import Claim, Requirement, Selection, Step
 
-from ats_tailor.adapt import (
+from ats_tailor.engine.adapt import (
     PAGE_TERMS_ATTR,
     alias_map,
     claims_from_index,
@@ -26,10 +26,10 @@ from ats_tailor.adapt import (
     section_rules,
     skill_claims,
 )
-from ats_tailor.atscheck import index_term_forms
-from ats_tailor.index_io import load_index_v2
+from ats_tailor.ats.check import index_term_forms
+from ats_tailor.index.io import load_index_v2
 from ats_tailor.jd.requirements import requirements_from_jd
-from ats_tailor.models import Bullet, Index, Period, Project, Role, Skill, SkillCategory
+from ats_tailor.index.models import Bullet, Index, Period, Project, Role, Skill, SkillCategory
 
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples" / "index"
@@ -192,7 +192,7 @@ def test_render_context_keeps_bullet_order_and_chronology(index):
         positions = [order[text] for text in context["bullets"]]
         assert positions == sorted(positions), context["id"]
 
-    from ats_tailor.loaders import parse_start_date
+    from ats_tailor.index.loaders import parse_start_date
 
     for group in (experience, entries):
         dates = [parse_start_date(c["period"]) for c in group]
@@ -328,7 +328,7 @@ def test_skill_rule_carries_the_gain_floor():
 
 
 def test_pinned_skill_groups_are_parsed_from_the_setting():
-    from ats_tailor import adapt
+    from ats_tailor.engine import adapt
 
     class _Settings:
         PIN_SKILL_GROUPS = " Programming Languages , Databases ,, "
@@ -343,14 +343,14 @@ def test_pinned_skill_groups_are_parsed_from_the_setting():
 
 def test_the_default_pin_keeps_a_languages_line(index):
     """v1 always rendered one; a resume without it reads as incomplete."""
-    from ats_tailor.adapt import pinned_skill_groups
+    from ats_tailor.engine.adapt import pinned_skill_groups
 
     assert "Programming Languages" in pinned_skill_groups()
     assert "Programming Languages" in {c.group for c in skill_claims(index)}
 
 
 def test_header_claims_carry_the_entry_line(index):
-    from ats_tailor.adapt import header_claims
+    from ats_tailor.engine.adapt import header_claims
 
     headers = {c.group: c for c in header_claims(index)}
     assert set(headers) == {i.id for _s, i in _visible(index)}
@@ -366,7 +366,7 @@ def test_header_claims_carry_the_entry_line(index):
 
 def test_a_role_header_carries_the_words_only_its_title_has():
     """The razer-swe case: "Software Engineering" exists only in the entry line."""
-    from ats_tailor.adapt import header_claims
+    from ats_tailor.engine.adapt import header_claims
 
     index = Index(
         skills=[
@@ -396,7 +396,7 @@ def test_a_role_header_carries_the_words_only_its_title_has():
 
 
 def test_render_context_never_renders_a_header_as_a_bullet(index):
-    from ats_tailor.adapt import header_claims
+    from ats_tailor.engine.adapt import header_claims
 
     claims = claims_from_index(index) + header_claims(index) + skill_claims(index)
     selection = Selection(
@@ -444,8 +444,8 @@ def test_v2_pipeline_fits_one_page_and_traces_its_choices(tmp_path):
         pytest.skip("latexmk not installed; selection checked, page fit not")
     assert selection["pages"] == 1
 
-    from ats_tailor.atscheck import extract_text, parse_check
-    from ats_tailor.loaders import load_profile
+    from ats_tailor.ats.check import extract_text, parse_check
+    from ats_tailor.index.loaders import load_profile
 
     pdf = tmp_path / "resume.pdf"
     profile = load_profile(REPO / "examples" / "profile.yaml")

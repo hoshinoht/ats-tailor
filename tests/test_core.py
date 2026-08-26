@@ -1,17 +1,19 @@
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from ats_tailor.loaders import (
+from ats_tailor.index.loaders import (
     build_cache_key,
     load_cached_embeddings,
     parse_start_date,
     save_cached_embeddings,
     validate_index,
 )
-from ats_tailor.rendering import build_project_context, latex_escape
+from ats_tailor.render.latex import build_project_context, latex_escape
 
 
 class CoreBehaviourTests(unittest.TestCase):
@@ -72,6 +74,26 @@ class CoreBehaviourTests(unittest.TestCase):
         certs = {"certifications": []}
         with self.assertRaisesRegex(ValueError, "unknown evidence ref"):
             validate_index(skills, projects, exp, certs)
+
+
+class LegacyEntryPointTests(unittest.TestCase):
+    """``ats_tailor.tailor`` is a shim; the engine lives in ``engine/legacy``."""
+
+    def test_the_shim_re_exports_main_from_where_the_code_went(self):
+        import ats_tailor.engine.legacy.tailor as engine
+        import ats_tailor.tailor as shim
+
+        self.assertIs(shim.main, engine.main)
+        self.assertIs(shim.run, engine.run)
+
+    def test_python_dash_m_still_reaches_the_parser(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "ats_tailor.tailor", "--help"],
+            capture_output=True, text=True,
+            cwd=Path(__file__).resolve().parents[1],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--company", result.stdout)
 
 
 if __name__ == "__main__":

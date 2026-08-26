@@ -17,8 +17,8 @@ from typing import Mapping, Sequence
 from ats_match import Requirement
 
 from .. import config
-from ..atscheck import classify_jd_sections, count_in_text
-from ..scoring import chunk_text
+from ..ats.check import classify_jd_sections, count_in_text
+from ..engine.legacy.scoring import chunk_text
 
 #: A line with no known vocabulary in it is still a requirement if it *asks*
 #: for something. Without this, "Able to work independently in a small team"

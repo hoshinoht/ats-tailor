@@ -17,12 +17,12 @@ from typing import Iterable, Mapping, Sequence
 
 from ats_match import Claim, Requirement, SectionRule
 
-from . import config
-from .atscheck import count_in_text
-from .index_io import to_legacy
-from .loaders import parse_start_date, recency_multiplier
-from .models import Index, Project, Role
-from .rendering import build_project_context, build_role_context
+from .. import config
+from ..ats.check import count_in_text
+from ..index.io import to_legacy
+from ..index.loaders import parse_start_date, recency_multiplier
+from ..index.models import Index, Project, Role
+from ..render.latex import build_project_context, build_role_context
 
 #: ``recency_multiplier`` returns 1.00–1.10; priors want 0–1.
 _RECENCY_SPAN = 0.10
@@ -397,7 +397,7 @@ def _skill_lines(
     categories can align onto the same posting word, and the same term printed
     twice is the stuffing ``ats-tailor check`` warns about.
     """
-    from .render.surface import dedupe_labels
+    from ..render.surface import dedupe_labels
 
     labels = dict(skill_labels or {})
     gains = {step.claim_id: float(step.gain) for step in selection.trace}

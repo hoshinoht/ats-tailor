@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from ats_tailor.atscheck import (
+from ats_tailor.ats.check import (
     STUFFING_LIMIT,
     auto_terms,
     classify_jd_sections,
@@ -33,14 +33,14 @@ from ats_tailor.atscheck import (
     surface_form_set,
     write_reports,
 )
-import ats_tailor.evaluate as evaluate_mod
-from ats_tailor.evaluate import (
+import ats_tailor.evaluation.evaluate as evaluate_mod
+from ats_tailor.evaluation.evaluate import (
     compare, find_jd, kendall_tau, means, precision_at_k, render_table,
 )
-from ats_tailor.index_io import load_index_v2
-from ats_tailor.labels import Label, init_label, load_labels, slug
-from ats_tailor.rendering import render_resume
-from ats_tailor.scoring import chunk_text, keyword_in_text
+from ats_tailor.index.io import load_index_v2
+from ats_tailor.evaluation.labels import Label, init_label, load_labels, slug
+from ats_tailor.render.latex import render_resume
+from ats_tailor.engine.legacy.scoring import chunk_text, keyword_in_text
 
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples"
@@ -562,7 +562,7 @@ def test_eval_writes_a_result_json_and_a_table(tmp_path):
     labels_dir = tmp_path / "labels"
     init_label(EXAMPLES / "jd" / "sample-backend.txt", "acme", "backend", labels_dir,
                index=load_index_v2(EXAMPLES_V2))
-    from ats_tailor.evaluate import evaluate
+    from ats_tailor.evaluation.evaluate import evaluate
 
     payload = evaluate(EXAMPLES_V2, labels_dir, EXAMPLES / "jd", tmp_path / "eval",
                        profile_path=EXAMPLES / "profile.yaml")

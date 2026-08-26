@@ -4,8 +4,9 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from .config import MAX_EXP_BULLETS, MAX_PROJECT_BULLETS, MIN_PROJECT_BULLETS
+from ..config import MAX_EXP_BULLETS, MAX_PROJECT_BULLETS, MIN_PROJECT_BULLETS
 
+#: Where the Jinja2 templates live — the ``render`` package, next to this module.
 PKG_DIR = Path(__file__).resolve().parent
 
 

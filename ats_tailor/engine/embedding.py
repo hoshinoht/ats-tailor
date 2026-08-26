@@ -18,8 +18,8 @@ from typing import Sequence
 
 import numpy as np
 
-from .config import EMBED_MODEL, HF_TOKEN
-from .loaders import _text_hash
+from ..config import EMBED_MODEL, HF_TOKEN
+from ..index.loaders import _text_hash
 
 #: Model-family → (query prefix, passage prefix). Matched as a substring of the
 #: model name, since the same family ships under many repo paths.

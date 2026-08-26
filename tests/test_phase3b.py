@@ -22,17 +22,17 @@ from pydantic import ValidationError
 
 from ats_match import Claim, Constraints, Params, Requirement, SectionRule, select
 
-from ats_tailor import overrides as ov
-from ats_tailor.adapt import PAGE_TERMS_ATTR, claims_from_index, render_context
-from ats_tailor.labels import merge_overrides
-from ats_tailor.models import (
+from ats_tailor.runs import overrides as ov
+from ats_tailor.engine.adapt import PAGE_TERMS_ATTR, claims_from_index, render_context
+from ats_tailor.evaluation.labels import merge_overrides
+from ats_tailor.index.models import (
     Bullet, Index, Period, Project, Role, Skill, SkillCategory,
 )
-from ats_tailor.store import (
+from ats_tailor.runs.store import (
     FINAL_STATUSES, MIGRATIONS, STATUSES, StatusError, Store, data_dir, store_path,
 )
-from ats_tailor.sync import content_hash, entity_key, index_entities, sync
-from ats_tailor import tracker
+from ats_tailor.runs.sync import content_hash, entity_key, index_entities, sync
+from ats_tailor.runs import tracker
 
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples" / "index"
@@ -108,7 +108,8 @@ def test_the_database_is_created_on_demand(tmp_path):
 
 
 def test_data_dir_prefers_the_env_then_the_index_then_the_cwd(monkeypatch, tmp_path):
-    from ats_tailor import config, store as store_mod
+    from ats_tailor import config
+    from ats_tailor.runs import store as store_mod
 
     monkeypatch.setattr(config, "DATA_DIR", str(tmp_path / "elsewhere"))
     assert store_mod.data_dir(tmp_path / "index") == tmp_path / "elsewhere"
@@ -655,7 +656,7 @@ def test_a_v2_run_records_itself_and_shows_up_in_the_tracker(tmp_path):
 
 
 def _example_index():
-    from ats_tailor.index_io import load_index_v2
+    from ats_tailor.index.io import load_index_v2
 
     return load_index_v2(EXAMPLES)
 
@@ -663,7 +664,7 @@ def _example_index():
 @smoke
 def test_sync_embed_fills_the_cache_the_next_run_reads(tmp_path):
     from ats_tailor import config
-    from ats_tailor.index_io import load_index_v2
+    from ats_tailor.index.io import load_index_v2
 
     data = tmp_path / "data"
     with Store(data / "ats.db") as store:
