@@ -503,7 +503,9 @@ The ceiling credits every must-have requirement with its single best-matching
 claim and ignores the page budget, the redundancy penalty, and everything else
 that makes a real run worse than its best case. A low ceiling is a fact about
 the index, not about the selection: no amount of tailoring fixes it, and the
-listed gaps are the evidence that is missing. Requirements naming nothing at
+listed gaps are the evidence that is missing — scoped to the requirements this
+posting's profile actually names, so a word left behind in prose nobody kept is
+not reported as something to go and learn. Requirements naming nothing at
 all ("works well in a team") are excluded from the average — every claim
 answers them about equally well, so their ceiling measures the encoder.
 
@@ -620,6 +622,16 @@ otherwise; `latexmk` and `tectonic` name one explicitly and fail if it is
 missing rather than quietly typesetting with the other. Everything downstream
 reads the PDF's text layer, so the parse and keyword checks are the same either
 way — which is the point: the container measures what the laptop measures.
+
+### PDF command timeouts
+
+MCP bounds external PDF work below its 300-second execution cap: compilation is
+120 seconds by default; cleanup and `pdfinfo`/`pdftotext` are 30 seconds. Set
+`ATS_LATEX_COMPILE_TIMEOUT`, `ATS_LATEX_CLEANUP_TIMEOUT`, `ATS_PDFINFO_TIMEOUT`,
+or `ATS_PDFTOTEXT_TIMEOUT` (seconds) to tune one. A timeout terminates the
+command's process group where supported. Compile and text-extraction timeouts
+return tool errors; `pdfinfo` falls back to the TeX log and cleanup remains
+best-effort after a successful compile.
 
 ## Output
 
@@ -886,7 +898,11 @@ so the label says `K8s`), tiered by the section they appear under — a
 requirements heading makes a term must-have, a "nice to have" heading or plain
 prose makes it nice — and JD technologies with no index claim behind them are
 included as nice terms marked `# not in index`, so a scaffold can surface real
-gaps and not just taxonomy hits:
+gaps and not just taxonomy hits. A word only counts as a technology where the
+posting capitalised it *by choice*: not in a `Label:` prefix, not opening a
+sentence, not inside a quoted motto, and not in a Title-Cased line of prose,
+which is how "We View Our Engineers As Holistic Problem Solvers" stops
+producing four of them:
 
 ```yaml
 must_terms:
@@ -1075,8 +1091,10 @@ subject to  lines(S) ≤ budget, and the ATS_MIN/MAX_* limits per section
    heading above it (`ats-tailor check` uses the same tiering, so the metric and
    the objective agree by construction): a requirements heading gives `must`,
    a "nice to have" heading gives `nice`, anything else is a `responsibility`
-   at half weight. Lines with no index vocabulary *and* no requirement verb are
-   dropped; a line kept only by its verb ("Works well independently and with
+   at half weight. A culture, benefits or how-to-apply heading gives `ignore`
+   and its lines produce no requirement at all — what a posting says about
+   itself is not a weaker ask, it is not an ask. Lines with no index vocabulary
+   *and* no requirement verb are dropped; a line kept only by its verb ("Works well independently and with
    others") is a *soft* requirement at `ATS_SOFT_REQ_WEIGHT` — still reported,
    but not competing for page space with "a solid understanding of Kubernetes",
    since every claim answers it about equally well. Deterministic — no model,

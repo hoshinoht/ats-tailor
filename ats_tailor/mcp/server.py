@@ -50,6 +50,11 @@ from ..service import (
     ServiceError,
 )
 
+try:  # macOS and Linux: released automatically when the process exits.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl
+    fcntl = None
+
 SERVER_NAME = "ats-tailor"
 
 #: Default and ceiling for a paginated text payload, in characters.
@@ -108,6 +113,49 @@ def _error(code: str, message: str, details: Any = None) -> dict[str, Any]:
     return {"ok": False, "error": error}
 
 
+class _ProcessLock:
+    """A nonblocking advisory lock shared by MCP processes for one repo."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.handle: Any = None
+        self.owner: int | None = None
+        self.depth = 0
+
+    def __enter__(self) -> "_ProcessLock":
+        owner = threading.get_ident()
+        if self.owner == owner:
+            self.depth += 1
+            return self
+        if fcntl is None:  # pragma: no cover - keep MCP usable on Windows
+            self.owner = owner
+            self.depth = 1
+            return self
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("a+")
+        try:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            self.handle.close()
+            self.handle = None
+            raise ServiceError(
+                "conflict", "ATS-Tailor is busy in another MCP process; retry shortly"
+            ) from exc
+        self.owner = owner
+        self.depth = 1
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.depth -= 1
+        if self.depth:
+            return
+        self.owner = None
+        if self.handle is not None:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
+            self.handle = None
+
+
 def _guard(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
     """Turn every failure into an error payload, keep stdout clean, one at a time.
 
@@ -125,18 +173,23 @@ def _guard(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
       thread pool; the runtime store is one SQLite connection, and this build
       of SQLite lets a connection move between threads but not be used by two
       at once. The lock is also why two ``ats_tailor`` calls cannot race into
-      the same output directory.
+      the same output directory. An advisory lock in ``data/`` extends that
+      rule across the local MCP processes OpenCode may launch for one repo.
     """
 
     @functools.wraps(fn)
     def wrapper(self: "ToolSet", *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if not self.lock.acquire(blocking=False):
+            return _error("conflict", "ATS-Tailor is busy in this MCP process; retry shortly")
         try:
-            with self.lock, contextlib.redirect_stdout(sys.stderr):
+            with self.process_lock, contextlib.redirect_stdout(sys.stderr):
                 return fn(self, *args, **kwargs)
         except ServiceError as exc:
             return {"ok": False, "error": exc.to_dict()}
         except Exception as exc:  # never let one reach the transport
             return _error("internal", f"{type(exc).__name__}: {exc}")
+        finally:
+            self.lock.release()
 
     # ``functools.wraps`` rather than hand-copied attributes: the SDK builds a
     # tool's argument and result schemas from the function's signature and its
@@ -172,6 +225,7 @@ class ToolSet:
     def __init__(self, service: Service, lock: threading.RLock | None = None):
         self.service = service
         self.lock = lock or threading.RLock()
+        self.process_lock = _ProcessLock(service.data_dir / ".ats-tailor-mcp.lock")
 
     # ── health and postings ──────────────────────────────────────────────
     @_guard

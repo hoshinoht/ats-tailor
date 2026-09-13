@@ -13,6 +13,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
+import threading
 from pathlib import Path
 
 import anyio
@@ -27,6 +30,7 @@ from ats_tailor.mcp.server import (
     paginate,
     wrap_posting,
 )
+from ats_tailor.mcp import server as mcp_server
 from ats_tailor.service import (
     OverridesPatch,
     Service,
@@ -74,6 +78,53 @@ def call(server, name: str, arguments: dict | None = None) -> dict:
         return result.structured_content
 
     return anyio.run(go)
+
+
+def test_toolsets_for_one_repo_return_conflict_while_process_lock_is_held(service):
+    if mcp_server.fcntl is None:
+        pytest.skip("fcntl advisory locks are unavailable")
+    first = ToolSet(service)
+    second = ToolSet(service)
+    with first.process_lock:
+        external = subprocess.run(
+            [sys.executable, "-c", (
+                "import fcntl, sys\n"
+                "with open(sys.argv[1], 'a+') as handle:\n"
+                "    try:\n"
+                "        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                "    except BlockingIOError:\n"
+                "        raise SystemExit(0)\n"
+                "raise SystemExit(1)\n"
+            ), str(first.process_lock.path)],
+            capture_output=True, text=True,
+        )
+        payload = second.ats_healthcheck()
+    assert external.returncode == 0
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "conflict"
+    assert "busy" in payload["error"]["message"]
+
+
+def test_toolset_returns_conflict_when_its_thread_lock_is_held(tools):
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with tools.lock:
+            acquired.set()
+            release.wait(1)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert acquired.wait(1)
+    try:
+        payload = tools.ats_healthcheck()
+    finally:
+        release.set()
+        holder.join(1)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "conflict"
+    assert "busy" in payload["error"]["message"]
 
 
 # ── sanitising ───────────────────────────────────────────────────────────────

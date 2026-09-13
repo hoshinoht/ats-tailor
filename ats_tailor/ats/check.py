@@ -22,11 +22,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
+from .. import config
 from ..engine.legacy.scoring import AMBIGUOUS_KEYWORDS, chunk_text
 
 # ── Section headings ──────────────────────────────────────────────────────────
@@ -138,6 +140,52 @@ class CompileError(RuntimeError):
     """The LaTeX engine failed; the message carries the tail of its log."""
 
 
+class _CommandTimeout(RuntimeError):
+    """A bounded external command exceeded its configured runtime."""
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """Stop a command and descendants without leaving a TeX worker behind."""
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:  # pragma: no cover - exercised by Windows users
+            process.terminate()
+    except OSError:
+        pass
+    try:
+        process.communicate(timeout=1)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:  # pragma: no cover - exercised by Windows users
+            process.kill()
+    except OSError:
+        pass
+    try:
+        process.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _run_command(argv: Sequence[str], *, cwd: Path | None = None, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run one PDF command with a timeout and a killable POSIX process group."""
+    process = subprocess.Popen(
+        argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=os.name == "posix",
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_tree(process)
+        command = " ".join(str(part) for part in argv)
+        raise _CommandTimeout(f"{command} timed out after {timeout}s") from exc
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 # ── Compilation ───────────────────────────────────────────────────────────────
 #: What ``ATS_LATEX_ENGINE`` may say. ``auto`` prefers ``latexmk`` — a TeX Live
 #: install is what a laptop has and what every measured baseline was produced
@@ -225,10 +273,11 @@ def compile_pdf(
     tex_path = Path(tex_path).resolve()
     work_dir = tex_path.parent
     engine = resolve_latex_engine(engine)
-    result = subprocess.run(
-        latex_command(engine, tex_path.name),
-        cwd=work_dir, capture_output=True, text=True,
-    )
+    try:
+        result = _run_command(latex_command(engine, tex_path.name), cwd=work_dir,
+                              timeout=config.LATEX_COMPILE_TIMEOUT)
+    except _CommandTimeout as exc:
+        raise CompileError(f"{engine} compile for {tex_path} {exc}") from exc
     log_path = work_dir / f"{tex_path.stem}.log"
     log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
     if result.returncode != 0:
@@ -245,8 +294,11 @@ def compile_pdf(
         kept_log.write_text(log_text)
     pages = page_count(pdf_path, log_text)
     if engine == "latexmk":
-        subprocess.run(["latexmk", "-c", tex_path.name], cwd=work_dir,
-                       capture_output=True, text=True)
+        try:
+            _run_command(["latexmk", "-c", tex_path.name], cwd=work_dir,
+                         timeout=config.LATEX_CLEANUP_TIMEOUT)
+        except _CommandTimeout:
+            pass
 
     if out_name:
         shutil.copyfile(pdf_path, work_dir / out_name)
@@ -257,10 +309,13 @@ def compile_pdf(
 def page_count(pdf_path: Path, log_text: str = "") -> int:
     """``pdfinfo`` when available, else the ``Output written on …`` log line."""
     if shutil.which("pdfinfo"):
-        info = subprocess.run(["pdfinfo", str(pdf_path)], capture_output=True, text=True)
-        match = re.search(r"^Pages:\s+(\d+)", info.stdout, re.MULTILINE)
-        if match:
-            return int(match.group(1))
+        try:
+            info = _run_command(["pdfinfo", str(pdf_path)], timeout=config.PDFINFO_TIMEOUT)
+            match = re.search(r"^Pages:\s+(\d+)", info.stdout, re.MULTILINE)
+            if match:
+                return int(match.group(1))
+        except _CommandTimeout:
+            pass
     match = re.search(r"Output written on .*?\((\d+) pages?", log_text, re.DOTALL)
     return int(match.group(1)) if match else 0
 
@@ -273,10 +328,13 @@ def extract_text(pdf_path: str | Path) -> str:
     character check fire on the tool rather than on the PDF.
     """
     pdf_path = Path(pdf_path)
-    result = subprocess.run(
-        ["pdftotext", "-layout", "-enc", "UTF-8", str(pdf_path), "-"],
-        capture_output=True, text=True,
-    )
+    try:
+        result = _run_command(
+            ["pdftotext", "-layout", "-enc", "UTF-8", str(pdf_path), "-"],
+            timeout=config.PDFTOTEXT_TIMEOUT,
+        )
+    except _CommandTimeout as exc:
+        raise RuntimeError(f"pdftotext failed for {pdf_path}: {exc}") from exc
     if result.returncode != 0:
         raise RuntimeError(f"pdftotext failed for {pdf_path}: {result.stderr.strip()}")
     return result.stdout
@@ -755,30 +813,57 @@ NICE_HEADER_RE = re.compile(
     r"desirable)|\bplus\s*$",
     re.IGNORECASE,
 )
+#: Headings introducing what the posting is *like* rather than what it asks
+#: for. Checked first, because a culture or benefits section under a "What we
+#: are looking for" heading otherwise inherits must-have weight and puts
+#: "We are 'Digital to the Core, and Serve with Heart'" on the page's budget.
+IGNORE_HEADER_RE = re.compile(
+    _HEADING_PREFIX + r"(?:what it.{0,4}s like|working here|why (?:join|work)|"
+    r"about (?:us|the team|the company)|our culture|culture|life at|"
+    r"what we offer|benefits|perks|compensation|how to apply|"
+    r"application process|equal opportunity)",
+    re.IGNORECASE,
+)
+
+#: A question put to the reader is a section header whatever its casing:
+#: "What you will be working on" is sentence-cased and still ends the section
+#: above it. The pronoun is what separates it from a bullet that happens to
+#: open with a question word ("How to design scalable systems").
+INTERROGATIVE_RE = re.compile(
+    r"^\W*(?:what|who|why|how|where)\b.*\b(?:you|your|we|our|us|it)\b",
+    re.IGNORECASE,
+)
 
 
 def classify_jd_sections(chunks: Sequence[str]) -> list[str]:
-    """Label each JD chunk ``must`` / ``nice`` / ``body`` by the header above it.
+    """Label each chunk ``must`` / ``nice`` / ``body`` / ``ignore`` by its header.
 
     Deliberately separate from ``scoring.compute_jd_weights``: that function
     feeds the *ranking* and widening it would move every score, while this one
     only decides which tier a term lands in. It also recognises the
     "What we are looking for" phrasing that Workday postings use, which the
     scoring regex does not.
+
+    ``ignore`` is what a posting says about itself — culture, benefits, how to
+    apply. It is not a weaker requirement, it is not a requirement, and the
+    caller is expected to drop it rather than tier it down.
     """
     tiers: list[str] = []
     current = "body"
     for chunk in chunks:
         text = chunk.strip()
-        marked = ("nice" if NICE_HEADER_RE.search(text) else
+        marked = ("ignore" if IGNORE_HEADER_RE.search(text) else
+                  "nice" if NICE_HEADER_RE.search(text) else
                   "must" if MUST_HEADER_RE.search(text) else None)
         if _heading_shape(text):
             if marked:
                 current = marked
-            elif _strong_heading(text) or _title_cased(text):
+            elif (_strong_heading(text) or _title_cased(text)
+                    or INTERROGATIVE_RE.match(text)):
                 # An unrecognised heading ends the section above it; a
-                # sentence-cased fragment is left alone, since it is more
-                # likely an unbulleted requirement than a new section.
+                # sentence-cased fragment is left alone unless it asks a
+                # question, since it is otherwise more likely an unbulleted
+                # requirement than a new section.
                 current = "body"
         tiers.append(current)
     return tiers
@@ -891,6 +976,9 @@ GAP_STOPLIST = {
     "refine", "sharing", "simultaneous", "smart", "solid", "stay", "studio",
     "succeed", "sustenance", "tech", "together", "transcribing", "users",
     "willingness", "works", "write", "dev", "docs", "se", "dh", "net",
+    # culture-section vocabulary: a posting describing itself, not asking
+    "core", "craft", "culture", "environment", "evidence", "heart", "impact",
+    "mindset", "mission", "solvers", "starters",
     # places and organisations
     "africa", "america", "asia", "avanade", "berlin", "china", "east", "europe",
     "frankfurt", "germany", "latin", "gts", "mdax", "healthtech", "icf",
@@ -920,6 +1008,39 @@ def gap_terms(jd_text: str, index: Any, extra_known: Sequence[str] = ()) -> list
     )
     return [term for term in found
             if len(term) > 1 and term.lower() not in GAP_STOPLIST]
+
+
+def profile_gap_terms(
+    gaps: Sequence[str], requirements: Iterable[Any]
+) -> list[str]:
+    """The gap terms this posting's *profile* actually asks for.
+
+    :func:`gap_terms` reads raw text and can only guess; a profile is the
+    decision about what the posting requires, whoever made it — the parser, a
+    model, or a human who ran ``jd show --edit``. A word the heuristic kept but
+    no requirement names is a word in a paragraph, not a hole in the index, and
+    reporting it as a gap sends the user shopping for a skill nobody asked for.
+
+    Requirements may be ``RequirementSpec``/``Requirement`` objects or the
+    plain dicts a stored run carries; both are read the same way.
+    """
+    haystack = "\n".join(_requirement_text(r) for r in requirements)
+    if not haystack.strip():
+        return []
+    lowered = haystack.lower()
+    return [term for term in gaps if count_in_text(str(term), lowered, haystack)]
+
+
+def _requirement_text(requirement: Any) -> str:
+    """Everything a requirement says, in the posting's words and the index's."""
+    if isinstance(requirement, Mapping):
+        read = requirement.get
+    else:
+        read = lambda key, default=None: getattr(requirement, key, default)  # noqa: E731
+    parts = [str(read("text", "") or "")]
+    for key in ("surface", "terms"):
+        parts.extend(str(value) for value in (read(key, ()) or ()))
+    return " ".join(parts)
 
 
 # ── Reports ───────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-"""v1's keyword expansion and coverage-gap detection — behaviour frozen.
+"""v1's keyword expansion, and the coverage-gap detector both engines share.
 
 ``--llm`` on the v1 engine means what it has always meant: ask a local model
 for technologies a posting implies but never spells out, and append them to the
@@ -69,6 +69,123 @@ _GAP_STOPWORDS = {
     "Alongside", "Order", "Right", "Industry", "Leading",
     "Business", "Stakeholders", "Products", "Solutions", "Value",
 }
+
+
+#: Function words that stay lowercase in ordinary prose. A *capitalised* one
+#: partway through a segment is the tell that a posting is Title-Casing a
+#: sentence — "You Won't Be Confined To a Single Layer Of The Stack" — and in
+#: such a segment every capital is English, not a product. A plain
+#: capitalised-ratio rule would say the same about "Red Hat OpenShift", which
+#: is why the tell is a function word wearing a capital and nothing else.
+_TITLE_PROSE_MARKERS = frozenset(
+    "A An The Of To At As In On For And Or But With By From Is Are Be Will "
+    "Our Your You We It Its This That".split()
+)
+
+#: What a capitalised word is doing when it is *listed* rather than starting a
+#: sentence: "- Terraform, Ansible", "Terraform (IaC)", "Go and Java". Matched
+#: from the end of the candidate, so it never anchors at the line start.
+_LIST_SHAPED_RE = re.compile(r"\s*(?:[,/(]|and\b|or\b)")
+
+#: A posting quoting itself — a motto, a slogan. Capitals inside are emphasis:
+#: "Digital to the Core, and Serve with Heart."
+_QUOTED_RE = re.compile(r'"[^"\n]*"|\u201c[^\u201d\n]*\u201d')
+
+#: A sentence ends here, closing punctuation and all.
+_SENTENCE_END_RE = re.compile(r"[.!?][\"'\u201d\u2019)\]]*\s+")
+
+#: The first letter of a word — used to find where a sentence actually starts,
+#: past a bullet glyph or leading whitespace.
+_WORD_START_RE = re.compile(r"[^\W\d_]")
+_WORD_RE = re.compile(r"[^\W\d_]+")
+
+#: The shapes a gap candidate can take. ALL-CAPS acronyms, CamelCase names
+#: and punctuated names are exempt from the positional rules that assume a
+#: capital is a choice: an acronym at the start of a line is still an acronym,
+#: and no amount of Title-Casing turns English into "OpenShift".
+_CANDIDATE_SHAPES = (
+    (re.compile(r"\b([A-Z][A-Z0-9]{1,5})\b"), True),
+    (re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b"), True),
+    (re.compile(r"\b([A-Z][a-z]{2,})\b"), False),
+    (re.compile(r"\b(C\+\+|C#|\.NET|F#)\b"), True),
+)
+
+
+def _label_end(line):
+    """Where a leading ``Label:`` prefix ends, or 0 when the line has none.
+
+    "Have a Security-First Mindset:", "Collaborate Across Disciplines:",
+    "Job Title:" — a posting Title-Cases these by convention, so a capital
+    inside one is evidence of nothing.
+    """
+    colon = line.find(":")
+    if colon < 0:
+        return 0
+    prefix = line[:colon]
+    if len(prefix.split()) > 6 or any(ch in prefix for ch in ".!?"):
+        return 0
+    return colon
+
+
+def _sentence_starts(line, label_end):
+    """Offsets where a capital is merely the first word of something."""
+    starts = set()
+    first = _WORD_START_RE.search(line)
+    if first:
+        starts.add(first.start())
+    for match in _SENTENCE_END_RE.finditer(line):
+        nxt = _WORD_START_RE.search(line, match.end())
+        if nxt:
+            starts.add(nxt.start())
+    if label_end:
+        nxt = _WORD_START_RE.search(line, label_end + 1)
+        if nxt:
+            starts.add(nxt.start())
+    return starts
+
+
+def _prose_spans(line):
+    """Segments of the line that are Title-Cased English rather than names.
+
+    Segments are delimited by commas and sentence punctuation, and a segment's
+    own first word is exempt — "As part of the Singpass team" opens with a
+    capitalised "As" and is still ordinary prose naming a real product.
+    """
+    spans = []
+    start = 0
+    boundaries = [m.start() for m in re.finditer(r"[,.;!?]", line)] + [len(line)]
+    for boundary in boundaries:
+        words = _WORD_RE.findall(line[start:boundary])
+        if any(word in _TITLE_PROSE_MARKERS for word in words[1:]):
+            spans.append((start, boundary))
+        start = boundary + 1
+    return spans
+
+
+class _LineShape:
+    """One posting line, pre-marked with the places a capital means nothing."""
+
+    def __init__(self, line):
+        self.line = line
+        self.label_end = _label_end(line)
+        self.quoted = [m.span() for m in _QUOTED_RE.finditer(line)]
+        self.sentence_starts = _sentence_starts(line, self.label_end)
+        self.prose = _prose_spans(line)
+
+    def is_clean(self, start, end, exempt=False):
+        """Is this occurrence of a capitalised word evidence of a real name?"""
+        if start < self.label_end:
+            return False
+        if any(a <= start < b for a, b in self.quoted):
+            return False
+        if self.line[end:end + 1] in ("'", "\u2019"):
+            return False
+        if exempt:
+            return True
+        if (start in self.sentence_starts
+                and not _LIST_SHAPED_RE.match(self.line, end)):
+            return False
+        return not any(a <= start < b for a, b in self.prose)
 
 
 def expand_jd_with_llm(jd_text, model_name, categories=None):
@@ -229,7 +346,19 @@ def _expand_two_pass(jd_text, model_name, categories):
 
 def detect_coverage_gaps(jd_text, skills_data, projects_data, exp_data, certs_data,
                          extra_known=None):
-    """Find tech-looking terms in the JD that aren't in any index file."""
+    """Find tech-looking terms in the JD that aren't in any index file.
+
+    A term qualifies on shape *and* position. Shape alone — any capitalised
+    word — is what a posting in Title Case ("Are Versatile Problem Solvers:")
+    defeats, and the terms it invents do not stop at the report: they become
+    weighted requirements. So a capital counts only where the posting chose it:
+    outside a ``Label:`` prefix, not opening a sentence unless it is being
+    listed, not inside a quoted motto, and not in a segment of Title-Cased
+    prose. A word the posting also spells lowercase is English by its own
+    admission. ALL-CAPS acronyms, CamelCase and punctuated names keep their
+    positional freedom — an acronym at the start of a line is still an acronym,
+    and no amount of Title-Casing turns an English word into "OpenShift".
+    """
     known = set()
     for cat in skills_data.get("categories", []):
         for skill in cat.get("skills", []):
@@ -267,15 +396,27 @@ def detect_coverage_gaps(jd_text, skills_data, projects_data, exp_data, certs_da
                 if len(word) > 1:
                     known.add(word)
 
-    candidates = set()
-    candidates.update(re.findall(r"\b([A-Z][A-Z0-9]{1,5})\b", jd_text))
-    candidates.update(re.findall(
-        r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", jd_text))
-    candidates.update(re.findall(r"\b([A-Z][a-z]{2,})\b", jd_text))
-    candidates.update(re.findall(r"\b(C\+\+|C#|\.NET|F#)\b", jd_text))
+    # A word is a gap only where it is capitalised *by choice*. Harvesting on
+    # shape alone reads a posting written in Title Case ("We View Our Engineers
+    # As Holistic Problem Solvers") as three dozen technologies, and every one
+    # of them goes on to become a weighted requirement.
+    lowercase_words = set(re.findall(r"\b[a-z]{2,}\b", jd_text))
+    clean = set()
+    for line in jd_text.splitlines():
+        shape = _LineShape(line)
+        for pattern, exempt in _CANDIDATE_SHAPES:
+            for match in pattern.finditer(line):
+                word = match.group(1)
+                if word in clean:
+                    continue
+                if shape.is_clean(match.start(1), match.end(1), exempt):
+                    clean.add(word)
 
-    gaps = sorted(
-        c for c in candidates
-        if c.lower() not in known and c not in _GAP_STOPWORDS
+    return sorted(
+        word for word in clean
+        if word.lower() not in known
+        and word not in _GAP_STOPWORDS
+        # The posting spelling it lowercase somewhere settles it: an English
+        # word that happened to be capitalised, not a name.
+        and word.lower() not in lowercase_words
     )
-    return gaps

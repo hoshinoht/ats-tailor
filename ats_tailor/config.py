@@ -175,6 +175,11 @@ HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or 
 #: `ats_tailor.ats.check.resolve_latex_engine` re-reads the environment at call
 #: time, so this constant is the documented default, not a cached decision.
 LATEX_ENGINE = _str("ATS_LATEX_ENGINE", "auto")
+#: External PDF commands must return before OpenCode MCP's 300s execution cap.
+LATEX_COMPILE_TIMEOUT = _int("ATS_LATEX_COMPILE_TIMEOUT", 120)
+LATEX_CLEANUP_TIMEOUT = _int("ATS_LATEX_CLEANUP_TIMEOUT", 30)
+PDFINFO_TIMEOUT = _int("ATS_PDFINFO_TIMEOUT", 30)
+PDFTOTEXT_TIMEOUT = _int("ATS_PDFTOTEXT_TIMEOUT", 30)
 
 # Runtime store (SQLite: embeddings, JD profiles, run records). Empty means
 # "beside the index directory" — see ats_tailor.runs.store.data_dir.
@@ -210,6 +215,14 @@ def validate_config(ignore_parse_keys=None):
         errors.append(f"ATS_LLM_PROVIDER must be one of: {', '.join(PROVIDERS)}")
     if LATEX_ENGINE not in {"auto", "latexmk", "tectonic"}:
         errors.append("ATS_LATEX_ENGINE must be one of: auto, latexmk, tectonic")
+    for name, value in (
+        ("ATS_LATEX_COMPILE_TIMEOUT", LATEX_COMPILE_TIMEOUT),
+        ("ATS_LATEX_CLEANUP_TIMEOUT", LATEX_CLEANUP_TIMEOUT),
+        ("ATS_PDFINFO_TIMEOUT", PDFINFO_TIMEOUT),
+        ("ATS_PDFTOTEXT_TIMEOUT", PDFTOTEXT_TIMEOUT),
+    ):
+        if value <= 0:
+            errors.append(f"{name} must be positive")
     if not str(PROMPT_VERSION).strip():
         errors.append("ATS_PROMPT_VERSION must not be empty")
     if LLM_PROBE_TIMEOUT <= 0:

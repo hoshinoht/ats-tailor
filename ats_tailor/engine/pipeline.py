@@ -39,6 +39,7 @@ from ..ats.check import (
     index_term_forms,
     latex_available,
     output_filename,
+    profile_gap_terms,
 )
 from .embedding import SentenceTransformerEmbedder, encode_store
 from ..index.io import to_legacy
@@ -201,8 +202,13 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
     say(f"Parsed {len(requirements)} requirement(s) "
         f"({sum(1 for r in requirements if r.kind == 'must')} must) "
         f"and {len(claims)} claim(s)")
-    if gaps:
-        say(f"  Warning: {len(gaps)} JD term(s) not in index: {', '.join(gaps)}")
+    # The gaps worth reporting are the ones the *profile* names: the raw
+    # heuristic reads the whole posting, prose included, and the profile is
+    # what this run decided the posting asks for.
+    reported_gaps = profile_gap_terms(gaps, requirements)
+    if reported_gaps:
+        say(f"  Warning: {len(reported_gaps)} JD term(s) not in index: "
+            f"{', '.join(reported_gaps)}")
 
     resolved = resolve_overrides(overrides, index)
     for warning in resolved.warnings():
@@ -319,7 +325,7 @@ def _tailor_v2(jd_text, index, profile, company, role, out_dir, options,
         )
     (out_dir / "match_report.md").write_text(generate_v2_report(
         company, role, requirements, claims, selection, matrix, skill_lines,
-        certs=certs, selected_certs=selected_certs, gaps=gaps,
+        certs=certs, selected_certs=selected_certs, gaps=reported_gaps,
         budget=chosen["budget"], pages=chosen["pages"], attempts=len(attempts),
         profile=jd_profile, variants=variants,
     ))

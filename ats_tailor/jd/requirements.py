@@ -52,6 +52,10 @@ def requirements_from_jd(
     for, which are kept as requirement terms precisely so a requirement the
     index cannot cover still shows up as one.
 
+    A chunk under an ``ignore`` heading (culture, benefits, how to apply) is
+    dropped outright rather than tiered down — see
+    :func:`~ats_tailor.ats.check.classify_jd_sections`.
+
     A line that names *nothing* — no index vocabulary, no gap term, kept only
     because it contains a requirement verb — is a soft requirement and takes
     ``soft_weight`` whatever heading it sits under (``ATS_SOFT_REQ_WEIGHT``,
@@ -70,6 +74,12 @@ def requirements_from_jd(
     merged: dict[str, Requirement] = {}
     for chunk, tier in zip(chunks, tiers):
         text = chunk.strip()
+        # What a posting says about itself is not a weaker ask, it is not an
+        # ask: "Mission-Driven Culture: we are Digital to the Core" would
+        # otherwise arrive as a must-have and compete for page space with
+        # "a solid understanding of Kubernetes".
+        if tier == "ignore":
+            continue
         if len(text.split()) < MIN_WORDS or not any(ch.isalpha() for ch in text):
             continue
         terms = _terms_in(text, term_forms, gap_list)

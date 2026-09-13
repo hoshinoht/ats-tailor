@@ -865,9 +865,11 @@ Seven things had to be decided rather than assumed:
   tokenised now, keeping the punctuation technology names are spelled with
   (`C++`, `.NET`, `CI/CD`) and dropping the punctuation sentences are.
 - **A sentence-initial capital is grammar, not a proper noun.** The gap
-  detector treats any capitalised word as a candidate technology, which on a
-  résumé bullet means the leading verb ("Designed", "Architected") is one. The
-  proposal's first word is therefore known by construction. A technology in
+  detector harvests candidates by shape, which on a résumé bullet means the
+  leading verb ("Designed", "Architected") is one. It has since learned to skip
+  a sentence-initial capital itself, but the proposal's first word is still
+  known by construction here — the guardrail must not depend on a heuristic
+  the coverage report is free to retune. A technology in
   that position is still caught by the alias-map rule whenever the index knows
   it at all, which is the case that matters.
 - **Metrics are read from the text, not only from the field.** `metrics:` is

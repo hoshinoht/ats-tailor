@@ -175,7 +175,7 @@ def test_tectonic_compiles_without_a_clean_up_pass(tmp_path, monkeypatch):
         (tmp_path / "resume.log").write_text("Output written on resume.pdf (1 page).\n")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(check_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(check_mod, "_run_command", fake_run)
     monkeypatch.setattr(check_mod.shutil, "which", lambda name: None)  # no pdfinfo
     result = check_mod.compile_pdf(tex_path, engine="tectonic")
 
@@ -195,7 +195,7 @@ def test_latexmk_still_cleans_up_after_itself(tmp_path, monkeypatch):
         (tmp_path / "resume.log").write_text("Output written on resume.pdf (1 page).\n")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(check_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(check_mod, "_run_command", fake_run)
     monkeypatch.setattr(check_mod.shutil, "which", lambda name: None)
     check_mod.compile_pdf(tex_path, engine="latexmk")
     assert calls[0][0] == "latexmk"
@@ -206,10 +206,103 @@ def test_a_failed_compile_names_the_engine_that_failed(tmp_path, monkeypatch):
     tex_path = tmp_path / "resume.tex"
     tex_path.write_text("% source\n")
     monkeypatch.setattr(
-        check_mod.subprocess, "run",
+        check_mod, "_run_command",
         lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "no font"))
     with pytest.raises(check_mod.CompileError, match="tectonic failed"):
         check_mod.compile_pdf(tex_path, engine="tectonic")
+
+
+def test_pdf_commands_receive_timeouts_and_translate_compile_timeouts(tmp_path, monkeypatch):
+    tex_path = tmp_path / "resume.tex"
+    tex_path.write_text("% source\n")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs["timeout"]))
+        (tmp_path / "resume.pdf").write_text("%PDF-1.7\n")
+        (tmp_path / "resume.log").write_text("Output written on resume.pdf (1 page).\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(check_mod, "_run_command", fake_run)
+    monkeypatch.setattr(check_mod.shutil, "which", lambda name: None)
+    check_mod.compile_pdf(tex_path, engine="latexmk")
+    assert calls == [
+        (["latexmk", "-pdf", "-interaction=nonstopmode", "-halt-on-error", "resume.tex"], 120),
+        (["latexmk", "-c", "resume.tex"], 30),
+    ]
+
+    monkeypatch.setattr(check_mod, "_run_command", lambda *args, **kwargs: (_ for _ in ()).throw(
+        check_mod._CommandTimeout("tectonic --keep-logs resume.tex timed out after 120s")))
+    with pytest.raises(check_mod.CompileError, match=r"compile.*timed out after 120s"):
+        check_mod.compile_pdf(tex_path, engine="tectonic")
+
+
+def test_timed_out_pdf_command_terminates_its_posix_process_group(monkeypatch):
+    class TimedOutProcess:
+        pid = 1234
+        returncode = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def communicate(self, timeout):
+            self.calls += 1
+            if self.calls == 1:
+                raise subprocess.TimeoutExpired("latexmk", timeout)
+            return "", ""
+
+    process = TimedOutProcess()
+    popen_kwargs = {}
+    signals = []
+    monkeypatch.setattr(check_mod.subprocess, "Popen", lambda *args, **kwargs: (
+        popen_kwargs.update(kwargs) or process))
+    monkeypatch.setattr(check_mod.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    with pytest.raises(check_mod._CommandTimeout, match="latexmk -pdf timed out after 1s"):
+        check_mod._run_command(["latexmk", "-pdf"], timeout=1)
+
+    if os.name == "posix":
+        assert popen_kwargs["start_new_session"] is True
+        assert signals == [(1234, check_mod.signal.SIGTERM)]
+
+
+def test_process_tree_timeout_reaps_after_term_races_to_exit(monkeypatch):
+    class ExitedProcess:
+        pid = 1234
+
+        def __init__(self):
+            self.calls = 0
+
+        def communicate(self, timeout):
+            self.calls += 1
+            return "", ""
+
+    process = ExitedProcess()
+    monkeypatch.setattr(check_mod.os, "killpg", lambda *args: (_ for _ in ()).throw(OSError()))
+    check_mod._terminate_process_tree(process)
+    assert process.calls == 1
+
+
+def test_ancillary_timeouts_fall_back_to_the_valid_compile_result(tmp_path, monkeypatch):
+    tex_path = tmp_path / "resume.tex"
+    tex_path.write_text("% source\n")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[0] == "latexmk" and "-c" in argv:
+            raise check_mod._CommandTimeout("latexmk -c resume.tex timed out after 30s")
+        if argv[0] == "pdfinfo":
+            raise check_mod._CommandTimeout("pdfinfo resume.pdf timed out after 30s")
+        (tmp_path / "resume.pdf").write_text("%PDF-1.7\n")
+        (tmp_path / "resume.log").write_text("Output written on resume.pdf (1 page).\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(check_mod, "_run_command", fake_run)
+    monkeypatch.setattr(check_mod.shutil, "which", lambda name: "/usr/bin/pdfinfo")
+    result = check_mod.compile_pdf(tex_path, engine="latexmk")
+    assert result.pages == 1
+    assert calls[-1] == ["latexmk", "-c", "resume.tex"]
 
 
 def test_the_healthcheck_reports_both_engines(service):

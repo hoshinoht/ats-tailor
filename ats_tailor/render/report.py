@@ -345,8 +345,8 @@ def generate_v2_report(
 
     if gaps:
         lines += ["", "## Index gaps", "",
-                  "Tech-looking terms in the posting with no claim behind them — "
-                  "report them, never stuff them.", "", ", ".join(gaps)]
+                  "Terms this posting's requirements name with no claim behind "
+                  "them — report them, never stuff them.", "", ", ".join(gaps)]
 
     lines.append("")
     return "\n".join(lines)

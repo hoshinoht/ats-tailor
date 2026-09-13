@@ -1071,7 +1071,7 @@ class Service:
         from ats_match import build_matrix
 
         from .engine.adapt import alias_map, claims_from_index, header_claims, skill_claims
-        from .ats.check import gap_terms
+        from .ats.check import gap_terms, profile_gap_terms
         from .engine.embedding import SentenceTransformerEmbedder, encode_store
 
         path = self.jd_path(slug)
@@ -1080,8 +1080,13 @@ class Service:
         profile = self.jd_profile(slug)
         requirements = profile.to_requirements()
         entry = self._meta().get(slug) or {}
-        gaps = gap_terms(text, index, extra_known=[
-            v for v in (entry.get("company"), entry.get("role")) if v])
+        # Scoped to the profile: the posting's prose is not a shopping list,
+        # and a word no requirement names is not a hole in the index.
+        gaps = profile_gap_terms(
+            gap_terms(text, index, extra_known=[
+                v for v in (entry.get("company"), entry.get("role")) if v]),
+            requirements,
+        )
 
         claims = claims_from_index(index)
         if config.HEADER_CLAIMS:
@@ -1603,7 +1608,7 @@ class Service:
 
     def review_pack(self, run_id: str) -> ReviewPack:
         """One payload for a reviewing agent: posting, gates, choices, coverage."""
-        from .ats.check import gap_terms
+        from .ats.check import gap_terms, profile_gap_terms
 
         run = self._run_row(run_id)
         data = dict(run.data or {})
@@ -1663,7 +1668,11 @@ class Service:
             selected_claims=selected,
             coverage_table=coverage_table,
             keyword_table=keyword_table,
-            gaps=gap_terms(text, index, extra_known=[run.company or "", run.role or ""]),
+            gaps=profile_gap_terms(
+                gap_terms(text, index,
+                          extra_known=[run.company or "", run.role or ""]),
+                requirements,
+            ),
             skills_lines=list(data.get("skill_lines") or []),
         )
 
