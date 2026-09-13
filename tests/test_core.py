@@ -13,7 +13,7 @@ from ats_tailor.index.loaders import (
     save_cached_embeddings,
     validate_index,
 )
-from ats_tailor.render.latex import build_project_context, latex_escape
+from ats_tailor.render.latex import build_project_context, derive_tagline, latex_escape
 
 
 class CoreBehaviourTests(unittest.TestCase):
@@ -56,6 +56,34 @@ class CoreBehaviourTests(unittest.TestCase):
         }
         ctx = build_project_context(project)
         self.assertIn("Reduced latency by 40%", ctx["bullets"])
+
+    def test_project_context_prefers_explicit_tagline(self):
+        project = {
+            "name": "Example",
+            "period": "Jan 2025 - Present",
+            "summary": "Semantic resume tailoring engine that matches a YAML index against postings",
+            "tagline": "Resume tailoring engine",
+            "tech_stack": {},
+            "responsibilities": ["Built API"],
+            "impact": [],
+        }
+        self.assertEqual(build_project_context(project)["tagline"], "Resume tailoring engine")
+
+    def test_derive_tagline_cuts_at_clause_boundary(self):
+        # A long summary without a "with/using/for" separator used to be chopped
+        # mid-clause at 50 characters ("... engine that matches a").
+        self.assertEqual(
+            derive_tagline("Semantic resume tailoring engine that matches a YAML index against job descriptions"),
+            "Semantic resume tailoring engine",
+        )
+        self.assertEqual(derive_tagline("Full-stack caregiver platform with event-driven backend"),
+                         "Full-stack caregiver platform")
+        self.assertEqual(derive_tagline("Real-time social platform, built for hawker centres"),
+                         "Real-time social platform")
+        # No separator at all: fall back to a word-boundary cut inside the window.
+        long = "Distributed multi-region observability aggregation service dashboard thing"
+        self.assertEqual(derive_tagline(long), "Distributed multi-region observability aggregation")
+        self.assertEqual(derive_tagline("Short summary"), "Short summary")
 
     def test_validate_index_rejects_unknown_evidence_refs(self):
         skills = {

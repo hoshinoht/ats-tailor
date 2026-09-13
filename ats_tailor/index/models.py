@@ -200,6 +200,9 @@ class Project(_Base):
     repo: str | None = None
     period: Period
     summary: str
+    #: Short phrase for the title line ("Name -- tagline"). When absent the
+    #: renderer derives one from ``summary`` by cutting at a clause boundary.
+    tagline: str | None = None
     tech_stack: dict[str, list[str]] = Field(default_factory=dict)
     skills: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)

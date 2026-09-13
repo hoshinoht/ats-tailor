@@ -449,6 +449,7 @@ def to_legacy(index: Index) -> tuple[dict, dict, dict, dict, dict | None]:
                 **({"repo": project.repo} if project.repo else {}),
                 "period": project.period.format(),
                 "summary": project.summary,
+                **({"tagline": project.tagline} if project.tagline else {}),
                 "tech_stack": {
                     key: list(values) for key, values in project.tech_stack.items()
                 },

@@ -48,6 +48,32 @@ def _dedupe_keep_order(items):
     return result
 
 
+#: Where a project summary stops describing *what it is* and starts describing
+#: how/with what. Cutting here leaves a phrase that stands on its own.
+TAGLINE_SEPARATORS = (
+    " with ", " using ", " for ", " via ", " comparing ", " between ",
+    " that ", " which ", ", ", " -- ", " — ", ": ", ";",
+)
+TAGLINE_MAX_CHARS = 50
+
+
+def derive_tagline(summary: str, max_chars: int = TAGLINE_MAX_CHARS) -> str:
+    """Shorten a project summary into a title-line tagline.
+
+    Cuts at the first separator (" with ", " that ", a comma, …) so the result is a
+    complete phrase, never a clause left hanging mid-sentence. Only a summary with
+    no separator at all falls back to a word-boundary cut at ``max_chars``.
+    """
+    summary = " ".join(summary.split())
+    positions = [summary.index(sep) for sep in TAGLINE_SEPARATORS if sep in summary]
+    if positions:
+        summary = summary[: min(positions)].rstrip()
+    if len(summary) <= max_chars:
+        return summary
+    # One extra char: if it is the space after a word, that word survives the cut.
+    return summary[: max_chars + 1].rsplit(" ", 1)[0].rstrip()
+
+
 def build_project_context(proj):
     """Build template context for a project."""
     tech_parts = []
@@ -76,14 +102,9 @@ def build_project_context(proj):
                 break
             bullets = _dedupe_keep_order(bullets + [candidate])
 
-    summary = proj.get("summary", proj["name"])
-    seps = [" with ", " using ", " for ", " via ", " comparing ", " between "]
-    cut_positions = [summary.index(s) for s in seps if s in summary]
-    if cut_positions:
-        summary = summary[:min(cut_positions)]
-    tagline = summary[:50]
-    if len(summary) > 50:
-        tagline = tagline.rsplit(" ", 1)[0]
+    tagline = (proj.get("tagline") or "").strip() or derive_tagline(
+        proj.get("summary", proj["name"])
+    )
 
     return {
         "name": proj["name"],
