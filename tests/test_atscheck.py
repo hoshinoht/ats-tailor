@@ -398,6 +398,7 @@ def test_render_resume_appends_the_target_title_to_the_summary():
     tex = render_resume(**kwargs, target_title="Site Reliability Engineer")
     assert "Backend engineer. Targeting: Site Reliability Engineer." in tex
     assert "\\section{Summary}" in tex
+    assert r"\titleformat{\section}{\large\bfseries}{}{0em}{\MakeUppercase}[\titlerule]" in tex
 
 
 # ── Reports ───────────────────────────────────────────────────────────────────
