@@ -10,7 +10,7 @@
 # network this image needs after the build — see HF_HUB_OFFLINE in the README
 # for running it air-gapped afterwards.
 
-FROM ghcr.io/astral-sh/uv:0.11.1 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.4 AS uv
 
 FROM python:3.12-slim
 
